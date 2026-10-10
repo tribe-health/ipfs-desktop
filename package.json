@@ -11,6 +11,8 @@
     "lint:fix": "ts-standard --fix && standard --fix",
     "pretest": "node scripts/ensure-electron.js",
     "test": "cross-env NODE_ENV=test playwright test 'test/unit/.*.spec.js'",
+    "pretest:hardening": "node scripts/ensure-electron.js",
+    "test:hardening": "node test/hardening/run-probe.js --mode=hardened --acao-webui && node test/hardening/run-agent-probe.js",
     "pretest:e2e": "node scripts/ensure-electron.js",
     "test:e2e": "xvfb-maybe cross-env NODE_ENV=test playwright test -c test/e2e/playwright.config.js",
     "postinstall": "run-s install-app-deps patch-deps macos-universal-kubo",

@@ -83,6 +83,10 @@ test.describe('applyDefaults', function () {
     expect(detectCurrentProfile(config.Import)).toEqual('unixfs-v1-2025')
   })
 
+  test('allows only the Web UI window origin on the RPC API', () => {
+    expect(config.API.HTTPHeaders).toEqual({ 'Access-Control-Allow-Origin': ['webui://localhost'] })
+  })
+
   test('writes the fast provide preferences explicitly', () => {
     expect(config.Import.FastProvideRoot).toEqual(true)
     expect(config.Import.FastProvideDAG).toEqual(true)
@@ -106,7 +110,7 @@ test.describe('migrateConfig', function () {
     expect(config.Import.FastProvideRoot).toEqual(true)
     expect(config.Import.FastProvideDAG).toEqual(true)
     expect(config.Import.FastProvideWait).toEqual(false)
-    expect(values.get('daemonConfigRevision')).toEqual(8)
+    expect(values.get('daemonConfigRevision')).toEqual(9)
   })
 
   // Revision 7 set Provide.Strategy on its own. `ipfs init` leaves the
@@ -126,6 +130,46 @@ test.describe('migrateConfig', function () {
     expect(config.Import.FastProvideRoot).toEqual(true)
     expect(config.Import.FastProvideDAG).toEqual(true)
     expect(config.Import.FastProvideWait).toEqual(false)
+  })
+
+  // The Web UI window runs with webSecurity on, so the RPC API has to name its
+  // origin. Revision 9 appends it and keeps whatever the user already allowed.
+  test('allows the Web UI window origin on the RPC API', () => {
+    const { migrateConfig } = loadMigrateConfig(8)
+    const ipfsd = repoWithConfig({
+      ...legacyConfig(),
+      API: { HTTPHeaders: { 'Access-Control-Allow-Origin': ['https://example.test'], 'Access-Control-Allow-Methods': ['PUT'] } }
+    })
+
+    migrateConfig(ipfsd)
+
+    const config = readConfig(ipfsd)
+    expect(config.API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual(['https://example.test', 'webui://localhost'])
+    expect(config.API.HTTPHeaders['Access-Control-Allow-Methods']).toEqual(['PUT'])
+  })
+
+  test('does not repeat the Web UI window origin', () => {
+    const { migrateConfig } = loadMigrateConfig(8)
+    const ipfsd = repoWithConfig({
+      ...legacyConfig(),
+      API: { HTTPHeaders: { 'Access-Control-Allow-Origin': ['webui://localhost'] } }
+    })
+
+    migrateConfig(ipfsd)
+
+    expect(readConfig(ipfsd).API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual(['webui://localhost'])
+  })
+
+  test('accepts a single string origin and a missing header block', () => {
+    const { migrateConfig: fromString } = loadMigrateConfig(8)
+    const stringRepo = repoWithConfig({ ...legacyConfig(), API: { HTTPHeaders: { 'Access-Control-Allow-Origin': 'https://example.test' } } })
+    fromString(stringRepo)
+    expect(readConfig(stringRepo).API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual(['https://example.test', 'webui://localhost'])
+
+    const { migrateConfig: fromMissing } = loadMigrateConfig(8)
+    const missingRepo = repoWithConfig({ ...legacyConfig(), API: {} })
+    fromMissing(missingRepo)
+    expect(readConfig(missingRepo).API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual(['webui://localhost'])
   })
 
   test('keeps a fast provide preference the user set', () => {

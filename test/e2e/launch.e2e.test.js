@@ -103,8 +103,8 @@ test.describe.serial('Application launch', async () => {
     expect(config).toBeDefined()
     // confirm PeerID is matching one from repoPath/config
     expect(config.Identity.PeerID).toBe(peerId)
-    // ensure strict CORS checking is enabled
-    expect(config.API.HTTPHeaders).toEqual({})
+    // ensure strict CORS checking is enabled: only the Web UI window's own origin
+    expect(config.API.HTTPHeaders).toEqual({ 'Access-Control-Allow-Origin': ['webui://localhost'] })
     expect(config.Discovery.MDNS.Enabled).toBeTruthy()
   })
 
@@ -154,7 +154,8 @@ test.describe.serial('Application launch', async () => {
     expect(config.API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual([
       'https://127.0.0.1:4040',
       'https://webui.ipfs.io',
-      'http://webui.ipfs.io.ipns.localhost:0' // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'http://webui.ipfs.io.ipns.localhost:0', // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'webui://localhost'
     ])
   })
 
@@ -174,7 +175,8 @@ test.describe.serial('Application launch', async () => {
     // ensure app has migrated config
     expect(config.API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual([
       'https://webui.ipfs.io',
-      'http://webui.ipfs.io.ipns.localhost:0' // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'http://webui.ipfs.io.ipns.localhost:0', // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'webui://localhost'
     ])
   })
 
@@ -194,7 +196,8 @@ test.describe.serial('Application launch', async () => {
     // ensure app has migrated config
     expect(config.API.HTTPHeaders['Access-Control-Allow-Origin']).toEqual([
       'https://webui.ipfs.io',
-      'http://webui.ipfs.io.ipns.localhost:0' // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'http://webui.ipfs.io.ipns.localhost:0', // ipfsd 'test' profile uses '/ip4/127.0.0.1/tcp/0'
+      'webui://localhost'
     ])
   })
 

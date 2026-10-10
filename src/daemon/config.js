@@ -8,6 +8,7 @@ const store = require('../common/store')
 const logger = require('../common/logger')
 const dialogs = require('./dialogs')
 const { PROFILES, DEFAULT_CID_PROFILE, hasCidProfileSettings } = require('../cid-profile')
+const { WEBUI_ORIGIN } = require('../webui/security')
 
 /**
  * Get repository configuration file path.
@@ -131,9 +132,10 @@ const DEFAULT_FAST_PROVIDE = {
 function applyDefaults (ipfsd) {
   const config = readConfigFile(ipfsd)
 
-  // Ensure strict CORS checking
+  // Ensure strict CORS checking, listing only the Web UI window's own origin: it runs
+  // with webSecurity on, so the RPC API must name it.
   // See: https://github.com/ipfs/js-ipfsd-ctl/issues/333
-  config.API = { HTTPHeaders: {} }
+  config.API = { HTTPHeaders: { 'Access-Control-Allow-Origin': [WEBUI_ORIGIN] } }
 
   config.Swarm = config.Swarm ?? {}
   config.Swarm.DisableNatPortMap = false // uPnP
@@ -213,7 +215,7 @@ const getGatewayPort = (config) => getHttpPort(config.Addresses.Gateway)
  */
 function migrateConfig (ipfsd) {
   // Bump revision number when new migration rule is added
-  const REVISION = 8
+  const REVISION = 9
   const REVISION_KEY = 'daemonConfigRevision'
   const CURRENT_REVISION = store.get(REVISION_KEY, 0)
 
@@ -347,6 +349,22 @@ function migrateConfig (ipfsd) {
         config.Import[key] = value
         changed = true
       }
+    }
+  }
+
+  if (CURRENT_REVISION < 9) {
+    // The Web UI window now runs with webSecurity on, so the browser enforces CORS on its
+    // calls to the RPC API and the node has to name `webui://localhost` as an allowed
+    // origin. Existing origins stay; this only appends one.
+    const api = config.API || {}
+    const httpHeaders = api.HTTPHeaders || {}
+    const current = httpHeaders['Access-Control-Allow-Origin']
+    const origins = Array.isArray(current) ? current : typeof current === 'string' ? [current] : []
+    if (!origins.includes(WEBUI_ORIGIN)) {
+      httpHeaders['Access-Control-Allow-Origin'] = [...origins, WEBUI_ORIGIN]
+      api.HTTPHeaders = httpHeaders
+      config.API = api
+      changed = true
     }
   }
 
