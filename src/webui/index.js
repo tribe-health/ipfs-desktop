@@ -1,5 +1,5 @@
 // @ts-check
-const { screen, BrowserWindow, ipcMain, app, session, safeStorage } = require('electron')
+const { screen, BrowserWindow, ipcMain, app, session, safeStorage, systemPreferences } = require('electron')
 const { join } = require('path')
 const { URL } = require('url')
 const serve = require('electron-serve')
@@ -24,6 +24,8 @@ const { readAgentChatSettings } = require('../agent/settings')
 const { createTokenStore } = require('../agent/token-store')
 const { registerAgentBridge } = require('../agent/bridge')
 const { ARG_AGENT_CHAT } = require('../agent/consts')
+const { createAgentConfirmation } = require('../agent/confirm')
+const { setConfirmation } = require('../agent/confirm/registry')
 
 serve({ scheme: 'webui', directory: join(__dirname, '../../assets/webui') })
 
@@ -233,6 +235,19 @@ module.exports = async function () {
     tokenStore: createTokenStore({ safeStorage, store, logger })
   })
   app.on('before-quit', () => agentBridge.dispose())
+  // The Desktop confirmation window for `ipfs mcp` writes. Opt-in and independent of the
+  // chat: inert unless the tray turned it on (store key desktopConfirm.enabled) and a
+  // pairing key is stored (src/agent/confirm/index.js). The tray reads it from the registry.
+  await ctx.getProp('i18n.initDone') // window titles and strings come from i18next
+  const agentConfirm = createAgentConfirmation({
+    electron: { BrowserWindow, ipcMain, session, safeStorage, systemPreferences },
+    store,
+    i18n: { t: (key, options) => i18n.t(key, options), exists: (key) => i18n.exists(key) },
+    logger
+  })
+  setConfirmation(agentConfirm)
+  agentConfirm.onChange(() => ipcMain.emit(ipcMainEvents.CONFIG_UPDATED))
+  app.on('before-quit', () => agentConfirm.dispose())
 
   const url = new URL('/', WEBUI_ORIGIN)
   url.hash = '/blank'

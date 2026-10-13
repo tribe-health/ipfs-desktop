@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title></title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <!-- No user-facing text lives in this file: the main process sends every string (i18next)
+       and the page fills the elements marked data-s, or the ones it renders itself. -->
+  <main aria-labelledby="title" aria-describedby="summary">
+    <div class="status-row">
+      <span id="badge" class="badge" data-tone="warn"></span>
+      <span id="queue"></span>
+      <span id="expiry"></span>
+    </div>
+    <h1 id="title" tabindex="-1"></h1>
+
+    <section id="request" class="panel" aria-label="" hidden>
+      <p id="summary" class="action"></p>
+      <p id="summary-cut" class="label" hidden></p>
+      <dl class="facts">
+        <dt data-s="factTool"></dt><dd id="tool" class="mono"></dd>
+        <dt data-s="factClass"></dt><dd id="class"></dd>
+        <dt data-s="factThrough"></dt><dd id="principal" class="mono"></dd>
+      </dl>
+      <div id="target-block" hidden>
+        <p id="target-label" class="label" data-s="factTargets"></p>
+        <ul id="targets" class="cids" aria-labelledby="target-label"></ul>
+      </div>
+    </section>
+
+    <p id="arm" class="notice" role="status" aria-live="polite" hidden></p>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+    <div id="actions" class="actions" role="group" hidden>
+      <button id="deny" type="button" data-s="deny"></button>
+      <button id="approve" type="button" class="primary" disabled></button>
+    </div>
+    <p id="hint" class="hint"></p>
+    <div class="actions">
+      <button id="off" type="button" class="quiet" data-s="turnOff"></button>
+    </div>
+    <p id="announce" class="sr-only" role="status" aria-live="assertive"></p>
+  </main>
+  <script src="confirm.js"></script>
+</body>
+</html>
