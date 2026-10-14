@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title></title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <!-- No user-facing text lives in this file: the main process sends every string (i18next). -->
+  <main aria-labelledby="title">
+    <div class="status-row">
+      <span id="badge" class="badge" data-tone="warn"></span>
+    </div>
+    <h1 id="title" tabindex="-1" data-s="pairTitle"></h1>
+
+    <p id="why" class="notice" hidden></p>
+
+    <section class="panel" aria-labelledby="title">
+      <ol class="steps">
+        <li data-s="pairStop"></li>
+        <li data-s="pairRun"></li>
+        <li data-s="pairRestart"></li>
+      </ol>
+      <p data-s="pairPrivacy"></p>
+      <form id="form" class="field" autocomplete="off">
+        <label for="key" data-s="pairKeyLabel"></label>
+        <input id="key" name="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="notice">
+        <label class="check"><input id="show" type="checkbox"> <span data-s="pairShowKey"></span></label>
+      </form>
+    </section>
+
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+    <div class="actions">
+      <button id="off" type="button" class="quiet" data-s="turnOff"></button>
+      <button id="later" type="button"></button>
+      <button id="store" type="submit" form="form" class="primary" data-s="pairStore"></button>
+    </div>
+  </main>
+  <script src="pair.js"></script>
+</body>
+</html>

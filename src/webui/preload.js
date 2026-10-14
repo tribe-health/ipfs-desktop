@@ -1,10 +1,41 @@
 // @ts-check
+// This script runs in the renderer sandbox (webPreferences.sandbox, see security.js).
+// A sandboxed preload can require only `electron` and a few Node built-ins, never a
+// relative file, so everything it needs is here. Values the main process owns arrive as
+// command-line arguments (additionalArguments); event and channel names are copies that
+// test/unit/preload.spec.js checks against src/common/ipc-main-events.js and
+// src/agent/consts.js.
 const { ipcRenderer, contextBridge } = require('electron')
-const connectionHook = require('./connection-status')
-const { COUNTLY_KEY, VERSION } = require('../common/consts')
-const ipcMainEvents = require('../common/ipc-main-events')
 
-connectionHook()
+const ipcMainEvents = Object.freeze({
+  COUNTLY_ADD_CONSENT: 'countly.addConsent',
+  COUNTLY_REMOVE_CONSENT: 'countly.removeConsent',
+  LANG_UPDATED: 'languageUpdated',
+  ONLINE_STATUS_CHANGED: 'online-status-changed',
+  WEBUI_VISIBILITY_CHANGED: 'webui-visibility-changed'
+})
+const AGENT_CHAT_CHANNELS = Object.freeze({
+  GET_ENDPOINT: 'ipfs-desktop:agent-chat:get-endpoint',
+  GET_TOKEN: 'ipfs-desktop:agent-chat:get-token'
+})
+const ARG_AGENT_CHAT = '--ipfs-desktop-agent-chat=1'
+
+/** @param {string} name */
+const argValue = (name) => {
+  const prefix = `--${name}=`
+  const found = process.argv.find((arg) => arg.startsWith(prefix))
+  return found === undefined ? '' : found.slice(prefix.length)
+}
+const VERSION = argValue('ipfs-desktop-version')
+const COUNTLY_KEY = argValue('ipfs-desktop-countly-key')
+
+// Report online/offline to the main process (was connection-status.js).
+const reportOnlineStatus = () => {
+  ipcRenderer.send(ipcMainEvents.ONLINE_STATUS_CHANGED, navigator.onLine)
+}
+window.addEventListener('online', reportOnlineStatus)
+window.addEventListener('offline', reportOnlineStatus)
+reportOnlineStatus()
 
 const urlParams = new URLSearchParams(window.location.search)
 
@@ -52,7 +83,19 @@ document.addEventListener('hashchange', () => {
   previousHash = window.location.hash
 })
 
+// The agent chat bridge exists only when the main process created this window with the
+// chat flag, which it does only while the chat is switched on and has a valid endpoint.
+// Two read-only calls, both answered for the Web UI's main frame alone. The token is
+// returned to the caller and to nobody else; there is no setter, no storage and no event.
+const makeAgentChatBridge = () => Object.freeze({
+  getEndpoint: () => ipcRenderer.invoke(AGENT_CHAT_CHANNELS.GET_ENDPOINT),
+  getToken: () => ipcRenderer.invoke(AGENT_CHAT_CHANNELS.GET_TOKEN)
+})
+const agentChat = process.argv.includes(ARG_AGENT_CHAT) ? makeAgentChatBridge() : undefined
+
 contextBridge.exposeInMainWorld('ipfsDesktop', {
+  ...(agentChat === undefined ? {} : { agentChat }),
+
   countlyAppKey: COUNTLY_KEY,
 
   countlyDeviceId: urlParams.get('deviceId'),

@@ -1,5 +1,5 @@
 // @ts-check
-const { screen, BrowserWindow, ipcMain, app, session } = require('electron')
+const { screen, BrowserWindow, ipcMain, app, session, safeStorage, systemPreferences } = require('electron')
 const { join } = require('path')
 const { URL } = require('url')
 const serve = require('electron-serve')
@@ -9,8 +9,9 @@ const logger = require('../common/logger')
 const store = require('../common/store')
 const { OPEN_WEBUI_LAUNCH: CONFIG_KEY } = require('../common/config-keys')
 const dock = require('../utils/dock')
-const { VERSION, ELECTRON_VERSION } = require('../common/consts')
+const { VERSION, ELECTRON_VERSION, COUNTLY_KEY } = require('../common/consts')
 const createToggler = require('../utils/create-toggler')
+const DISPLAY_NAME = require('./display-name')
 const { showDialog } = require('../dialogs')
 const { getSecondsSinceAppStart } = require('../metrics/appStart')
 const { performance } = require('perf_hooks')
@@ -19,32 +20,44 @@ const { analyticsKeys } = require('../analytics/keys')
 const ipcMainEvents = require('../common/ipc-main-events')
 const getCtx = require('../context')
 const { STATUS } = require('../daemon/consts')
-const WEBUI_ORIGIN = 'webui://localhost'
+const { WEBUI_ORIGIN, installCsp, webPreferences, originFromMultiaddr } = require('./security')
+const { readAgentChatSettings } = require('../agent/settings')
+const { createTokenStore } = require('../agent/token-store')
+const { registerAgentBridge } = require('../agent/bridge')
+const { ARG_AGENT_CHAT } = require('../agent/consts')
+const { createAgentConfirmation } = require('../agent/confirm')
+const { setConfirmation } = require('../agent/confirm/registry')
 
 serve({ scheme: 'webui', directory: join(__dirname, '../../assets/webui') })
 
 /**
  *
+ * @param {{ enabled: boolean }} agentChat
  * @returns {BrowserWindow}
  */
-const createWindow = () => {
+const createWindow = (agentChat) => {
   logger.info('[webui] creating window')
   const dimensions = screen.getPrimaryDisplay()
 
   const window = new BrowserWindow({
-    title: 'IPFS Desktop',
+    title: DISPLAY_NAME,
     show: false,
     autoHideMenuBar: true,
     titleBarStyle: 'hiddenInset',
     width: store.get('window.width', dimensions.width < 1440 ? dimensions.width : 1440),
     height: store.get('window.height', dimensions.height < 900 ? dimensions.height : 900),
-    webPreferences: {
+    webPreferences: webPreferences({
       preload: join(__dirname, 'preload.js'),
-      webSecurity: false,
-      allowRunningInsecureContent: false,
-      enableRemoteModule: process.env.NODE_ENV === 'test', // https://github.com/electron-userland/spectron/pull/738#issuecomment-754810364
-      nodeIntegration: process.env.NODE_ENV === 'test'
-    }
+      // The preload is sandboxed and cannot require ../common/consts, so the two values it
+      // reports to the Web UI arrive as arguments. The agent chat flag is present only
+      // while the chat is on; it is read once, so a change applies on the next launch.
+      additionalArguments: [
+        `--ipfs-desktop-version=${VERSION}`,
+        `--ipfs-desktop-countly-key=${COUNTLY_KEY}`,
+        ...(agentChat.enabled ? [ARG_AGENT_CHAT] : [])
+      ],
+      allowNodeIntegration: process.env.NODE_ENV === 'test'
+    })
   })
 
   window.webContents.once('did-start-loading', (event) => {
@@ -202,9 +215,40 @@ module.exports = async function () {
   })
 
   openExternal()
-  const window = createWindow()
+  // Agent chat: off unless the operator turned it on and gave it a valid endpoint. Read
+  // once per launch. Off means no flag on the window, no IPC handler, no mcp origin in
+  // the CSP.
+  const agentChat = readAgentChatSettings(store)
+  const window = createWindow(agentChat)
   ctx.setProp('webui', window)
   let apiAddress = null
+  let gatewayAddress = null
+
+  installCsp(session.defaultSession, () => ({
+    apiOrigin: originFromMultiaddr(apiAddress),
+    gatewayOrigin: originFromMultiaddr(gatewayAddress),
+    mcpOrigin: agentChat.origin
+  }))
+  const agentBridge = registerAgentBridge({
+    ipcMain,
+    getWebuiContents: () => (window.isDestroyed() ? null : window.webContents),
+    settings: agentChat,
+    tokenStore: createTokenStore({ safeStorage, store, logger })
+  })
+  app.on('before-quit', () => agentBridge.dispose())
+  // The Desktop confirmation window for `ipfs mcp` writes. Opt-in and independent of the
+  // chat: inert unless the tray turned it on (store key desktopConfirm.enabled) and a
+  // pairing key is stored (src/agent/confirm/index.js). The tray reads it from the registry.
+  await ctx.getProp('i18n.initDone') // window titles and strings come from i18next
+  const agentConfirm = createAgentConfirmation({
+    electron: { BrowserWindow, ipcMain, session, safeStorage, systemPreferences },
+    store,
+    i18n: { t: (key, options) => i18n.t(key, options), exists: (key) => i18n.exists(key) },
+    logger
+  })
+  setConfirmation(agentConfirm)
+  agentConfirm.onChange(() => ipcMain.emit(ipcMainEvents.CONFIG_UPDATED))
+  app.on('before-quit', () => agentConfirm.dispose())
 
   const url = new URL('/', WEBUI_ORIGIN)
   url.hash = '/blank'
@@ -312,6 +356,7 @@ module.exports = async function () {
       }
 
       apiAddress = ipfsd.apiAddr
+      gatewayAddress = ipfsd.gatewayAddr
       url.searchParams.set('api', apiAddress.toString())
       updateLanguage()
       loadIfChanged(url.toString())

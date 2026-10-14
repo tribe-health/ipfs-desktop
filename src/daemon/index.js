@@ -6,6 +6,7 @@ const store = require('../common/store')
 const logger = require('../common/logger')
 const { STATUS } = require('./consts')
 const createDaemon = require('./daemon')
+const { createMcpSidecar, MCP_SIDECAR_ENABLED_KEY } = require('./mcp-sidecar')
 const ipcMainEvents = require('../common/ipc-main-events')
 const { analyticsKeys } = require('../analytics/keys')
 const getCtx = require('../context')
@@ -14,6 +15,22 @@ async function setupDaemon () {
   let ipfsd = null
   let status = null
   let wasOnline = null
+  let mcpSidecar = null
+
+  const getMcpSidecar = () => {
+    if (!mcpSidecar) {
+      mcpSidecar = createMcpSidecar()
+      // The tray toggle writes the store key; apply it without a restart.
+      if (typeof store.onDidChange === 'function') {
+        store.onDidChange(MCP_SIDECAR_ENABLED_KEY, (value) => {
+          mcpSidecar.setEnabled(value !== false).catch((err) => {
+            logger.error(`[mcp-sidecar] applying the off switch failed: ${err.toString()}`)
+          })
+        })
+      }
+    }
+    return mcpSidecar
+  }
 
   const updateStatus = (stat, id = null) => {
     status = stat
@@ -81,11 +98,26 @@ async function setupDaemon () {
 
     log.end()
     updateStatus(STATUS.STARTING_FINISHED, res.id)
+
+    if (fs.pathExistsSync(join(ipfsd.path, 'config'))) {
+      try {
+        await getMcpSidecar().start(ipfsd.path)
+      } catch (err) {
+        // The sidecar is auxiliary: its failure must not fail the daemon.
+        logger.error(`[mcp-sidecar] failed to start: ${err.toString()}`)
+      }
+    } else {
+      logger.info('[mcp-sidecar] daemon is remote; ipfs mcp sidecar not started')
+    }
   }
 
   const stop = async () => {
     if (!ipfsd) {
       return
+    }
+
+    if (mcpSidecar) {
+      await mcpSidecar.stop()
     }
 
     const log = logger.start('[ipfsd] stop daemon', { withAnalytics: analyticsKeys.DAEMON_STOP })
@@ -126,8 +158,29 @@ async function setupDaemon () {
 
   ipcMain.on(ipcMainEvents.IPFS_CONFIG_CHANGED, restartIpfs)
 
-  app.on('before-quit', async () => {
-    if (ipfsd) await stopIpfs()
+  // Quit must not leave `ipfs mcp` holding its port. Electron does not await an
+  // async before-quit listener, so when the sidecar has a live child, quit is
+  // deferred once (preventDefault), the daemon and sidecar are stopped, and
+  // app.quit() is called again. Without a live sidecar the original behaviour
+  // is unchanged.
+  let quitDeferred = false
+  app.on('before-quit', (event) => {
+    const sidecarLive = mcpSidecar && mcpSidecar.hasLiveProcess()
+    if (!sidecarLive || quitDeferred) {
+      return ipfsd ? stopIpfs() : undefined
+    }
+    quitDeferred = true
+    event.preventDefault()
+    return stopIpfs()
+      .catch((err) => logger.error(`[ipfsd] stop on quit failed: ${err.toString()}`))
+      .then(() => mcpSidecar.stop())
+      .catch((err) => logger.error(`[mcp-sidecar] stop on quit failed: ${err.toString()}`))
+      .then(() => app.quit())
+  })
+
+  // Last resort: whatever is still tracked is killed synchronously, by PID.
+  app.on('will-quit', () => {
+    if (mcpSidecar) mcpSidecar.killNow()
   })
 
   await startIpfs()
