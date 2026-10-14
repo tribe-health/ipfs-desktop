@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.50.1",
   "productName": "IPFS Desktop",
+  "displayName": "Promethity",
   "description": "IPFS Native Application",
   "main": "src/index.js",
   "scripts": {

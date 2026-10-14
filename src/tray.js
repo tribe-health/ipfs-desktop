@@ -21,6 +21,7 @@ const createToggler = require('./utils/create-toggler')
 const getCtx = require('./context')
 const { getConfirmation } = require('./agent/confirm/registry')
 const { buildAgentConfirmSubmenu } = require('./agent/confirm/tray-menu')
+const DISPLAY_NAME = require('./webui/display-name')
 
 // "Default" lets the user opt back to implicit kubo defaults by nulling
 // our owned keys; it stays visible so the user can switch from a named
@@ -387,7 +388,7 @@ module.exports = async function () {
   const ctx = getCtx()
   logger.info('[tray] starting')
   tray = new Tray(icon(off))
-  tray.setToolTip('IPFS Desktop')
+  tray.setToolTip(DISPLAY_NAME)
 
   const launchWebUI = ctx.getFn('launchWebUI')
 

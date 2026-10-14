@@ -11,6 +11,7 @@ const { OPEN_WEBUI_LAUNCH: CONFIG_KEY } = require('../common/config-keys')
 const dock = require('../utils/dock')
 const { VERSION, ELECTRON_VERSION, COUNTLY_KEY } = require('../common/consts')
 const createToggler = require('../utils/create-toggler')
+const DISPLAY_NAME = require('./display-name')
 const { showDialog } = require('../dialogs')
 const { getSecondsSinceAppStart } = require('../metrics/appStart')
 const { performance } = require('perf_hooks')
@@ -39,7 +40,7 @@ const createWindow = (agentChat) => {
   const dimensions = screen.getPrimaryDisplay()
 
   const window = new BrowserWindow({
-    title: 'IPFS Desktop',
+    title: DISPLAY_NAME,
     show: false,
     autoHideMenuBar: true,
     titleBarStyle: 'hiddenInset',
