@@ -162,7 +162,7 @@ existing e2e tests only.
 
 | File | Role |
 | --- | --- |
-| `src/agent/settings.js` | Reads `agentChat.enabled` and `agentChat.endpoint` from the Desktop store. Both off/empty by default. The chat is on only when the switch is `true` AND the endpoint is valid (https, or http on loopback; path ends `/agui`; no credentials, query or fragment; the island's own rules). A half-configured chat behaves as off. |
+| `src/agent/settings.js` | Reads `agentChat.enabled` and `agentChat.endpoint` from the Desktop store. `agentChat.enabled` is written as `true` at app start when the store lacks the key (`src/agent/defaults.js`); the endpoint is empty by default. The chat is on only when the switch is `true` AND the endpoint is valid (https, or http on loopback; path ends `/agui`; no credentials, query or fragment; the island's own rules). A half-configured chat behaves as off. |
 | `src/agent/token-store.js` | The bearer for the chat's `ui` principal. Encrypted with `safeStorage`, kept as base64 ciphertext in the store key `agentChat.tokenCipher`. Refuses to store when `isEncryptionAvailable()` is false or, on Linux, when the backend is `basic_text` or `unknown` (a fixed key is no protection). Never logs a token. A ciphertext that no longer decrypts reads as no token. |
 | `src/agent/bridge.js` | Registers two `ipcMain.handle` channels, only when the chat is enabled. Each answers only the Web UI window's own `webContents`, only its main frame, only while that frame's URL is `webui://localhost`. Anything else gets `undefined`/`null`. |
 | `src/webui/preload.js` | Exposes `window.ipfsDesktop.agentChat = { getEndpoint(), getToken() }` (frozen) only when the window was created with `--ipfs-desktop-agent-chat=1`, which the main process passes only when the chat is enabled. No setter, no storage, no event. |
@@ -173,7 +173,7 @@ Countly key arrive as `additionalArguments`, and its copies of the IPC names are
 
 ### Off switch (and what "off" means)
 
-Default: `agentChat.enabled` is absent, there is no endpoint, no `agentChat` key on
+Default: `agentChat.enabled` is written `true` at start, but with no endpoint, no `agentChat` key on
 `window.ipfsDesktop`, no IPC channel in the main process, and no `ipfs mcp` origin in the CSP.
 It is read once at window creation: a change applies on the next launch. Disabled state is
 tested at three levels: unit (`test/unit/agent-chat.spec.js`: no `ipcMain.handle` call),
@@ -187,6 +187,25 @@ restarts. **There is no user path yet to put the token into `safeStorage`**: tha
 pairing flow in task 1.4, which depends on `native-confirmation-prompt`. `tokenStore.set` is
 the call it will use. I deliberately did not add a tray item or a renderer setter: a renderer
 that can set the token or the endpoint can widen its own CSP.
+
+### Defaults: the agent features ship on, an opt-out survives
+
+Kubo's `AGENTS.md` (User Agency) lists the agent features that are the fork's purpose as on by
+default, each with an off switch. At every app start `src/agent/defaults.js` writes `true` for
+`agentChat.enabled`, `desktopConfirm.enabled` (never on Windows, where Node cannot reach the
+server's Unix socket) and `mcpSidecar.enabled`, **only for a key the store does not hold**. Any stored
+value, `false` above all, is the operator's decision and is not rewritten, now or on any later start.
+Deleting a key gives the default again. The line logged when it writes names the keys and the way off.
+
+| Feature | On by default | Off switch | Disabled-state test |
+|---------|---------------|------------|---------------------|
+| Local `ipfs mcp` endpoint (sidecar) | yes, `mcpSidecar.enabled` | tray "Run the local agent endpoint", or `false` in `config.json` | `test/unit/mcp-sidecar.spec.js`, `test/unit/agent-defaults.spec.js` |
+| Web UI agent chat | switch yes; inert until `agentChat.endpoint` is set | `agentChat.enabled: false` | `test/unit/agent-chat.spec.js`, `test/unit/agent-defaults.spec.js` |
+| Desktop confirmation window | yes (not on Windows) | tray "Confirm agent writes in this app", or `desktopConfirm.enabled: false` | `test/unit/agent-confirm.spec.js`, `test/unit/agent-defaults.spec.js` |
+| Agent settings bridge | yes, `agentSettings.enabled` | `agentSettings.enabled: false` | `test/unit/agent-settings-bridge.spec.js` |
+
+Writes still need a confirmation, and no third-party service is enabled without the operator choosing it.
+With the confirmation window on and no pairing key, the pairing window opens in the back (no focus steal).
 
 ### Off switches of the agent endpoint and its settings bridge
 

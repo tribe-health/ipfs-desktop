@@ -1,6 +1,6 @@
 // @ts-check
-// Agent chat settings, read from the Desktop store. The chat is off and has no endpoint
-// until the operator sets both. There is no default endpoint and no discovery: the value
+// Agent chat settings, read from the Desktop store. The switch is written as true at app start when absent
+// (src/agent/defaults.js; the reader's own fallback stays off), but the chat has no endpoint until the operator sets one, so it stays inert until then. There is no default endpoint and no discovery: the value
 // is whatever the operator typed, accepted only in the shape the island itself accepts.
 
 const { KEYS } = require('./consts')

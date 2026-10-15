@@ -28,6 +28,12 @@ const { ARG_AGENT_CHAT, ARG_AGENT_SETTINGS, KEYS: AGENT_KEYS } = require('../age
 const { createMcpSidecarSecrets } = require('../daemon/mcp-sidecar')
 const { getMcpSidecar, sidecarBaseUrl: loopbackBaseUrl } = require('../agent/sidecar-registry')
 const { createSettingsApi } = require('../agent/settings-api')
+const { applyAgentDefaults } = require('../agent/defaults')
+const { createHostConfirm } = require('../agent/host-confirm')
+const { createSearchService } = require('../agent/search/service')
+const { createSearchWindow, captureAllowed } = require('../agent/search/window')
+const { createBulkRunState } = require('../agent/search/status')
+const { setSearchWindow } = require('../agent/search/registry')
 const { createSettingsService } = require('../agent/settings-service')
 const { registerAgentSettingsBridge } = require('../agent/settings-bridge')
 const { createSidecarWatcher, createEventPump } = require('../agent/sidecar-watch')
@@ -44,7 +50,7 @@ serve({ scheme: 'webui', directory: join(__dirname, '../../assets/webui') })
  * @param {boolean} agentSettings the agent settings bridge is on
  * @returns {BrowserWindow}
  */
-const createWindow = (agentChat, agentSettings) => {
+const createWindow = (agentChat, agentSettings, onHide = () => {}) => {
   logger.info('[webui] creating window')
   const dimensions = screen.getPrimaryDisplay()
 
@@ -187,6 +193,8 @@ const createWindow = (agentChat, agentSettings) => {
     window.hide()
     dock.hide()
     logger.info('[web ui] window hidden')
+    // Closing the window ends its life for the agent settings: a declined host may be asked again.
+    onHide()
   })
 
   return window
@@ -218,16 +226,21 @@ module.exports = async function () {
   })
 
   openExternal()
-  // Agent chat: off unless the operator turned it on and gave it a valid endpoint. Read
+  // Agent features ship on: write the defaults for keys the store lacks (a stored false
+  // survives), then read the settings. Agent chat: on unless the operator turned it off, and
+  // inert without a valid endpoint. Read
   // once per launch. Off means no flag on the window, no IPC handler, no mcp origin in
   // the CSP.
+  applyAgentDefaults({ store, logger })
   const agentChat = readAgentChatSettings(store)
   // The agent settings bridge: on unless the store says false. Read once per launch like
   // the chat flag; off means no flag on the window, no IPC handler, no event stream.
   const agentSettingsOn = store.get(AGENT_KEYS.SETTINGS_ENABLED, true) !== false
   // `let`: the window is recreated when the sidecar's port changes (recreateWindow below),
   // and every closure here must follow the current one.
-  let window = createWindow(agentChat, agentSettingsOn)
+  // Set once the settings service exists; called when the window hides or is recreated.
+  let forgetDeclinedHosts = () => {}
+  let window = createWindow(agentChat, agentSettingsOn, () => forgetDeclinedHosts())
   ctx.setProp('webui', window)
   // One listener for the life of the app, acting on whichever window is current, so a
   // recreated window adds nothing. Makes sure the app quits even though closing the
@@ -280,13 +293,12 @@ module.exports = async function () {
       try { return sidecarSecrets.ensureAdminToken().value } catch (_) { return undefined }
     }
   })
-  const settingsService = createSettingsService({
-    api: settingsApi,
-    getSidecar: getMcpSidecar,
-    secrets: sidecarSecrets,
-    // The same Touch ID helper the confirmation window uses.
+  // One confirmation gate for every decision about where the key or node content may go:
+  // the agent backend (settings) and the Search hosts. Touch ID (the same helper the
+  // confirmation window uses), else a native dialog parented to the Web UI window while it
+  // is visible, naming the host.
+  const hostConfirm = createHostConfirm({
     authenticate: createTouchId(systemPreferences),
-    // Without Touch ID: a native dialog parented to the Web UI window, naming the host.
     confirmNative: createNativeHostConfirm({
       dialog,
       getWindow: () => window,
@@ -295,6 +307,45 @@ module.exports = async function () {
     t: (key, options) => i18n.t(key, options),
     logger
   })
+  const settingsService = createSettingsService({
+    api: settingsApi,
+    getSidecar: getMcpSidecar,
+    secrets: sidecarSecrets,
+    authenticate: createTouchId(systemPreferences),
+    hostConfirm,
+    t: (key, options) => i18n.t(key, options),
+    logger
+  })
+  forgetDeclinedHosts = () => hostConfirm.forgetDeclined('backend')
+  // Search settings (vector index): a native window, off by default. Changing them restarts
+  // the sidecar once (src/agent/search/service.js).
+  // The Search window exists after the service; the native confirmation is parented to it.
+  let searchWindow = null
+  const searchService = createSearchService({
+    store,
+    getSidecar: getMcpSidecar,
+    hostConfirm,
+    getParentWindow: () => (searchWindow ? searchWindow.getWindow() : null),
+    bulkRunState: createBulkRunState({
+      getBaseUrl: sidecarBaseUrl,
+      getUiToken: () => {
+        try { return sidecarSecrets.ensureUiToken().value } catch (_) { return undefined }
+      }
+    }),
+    t: (key, options) => i18n.t(key, options),
+    logger
+  })
+  searchWindow = createSearchWindow({
+    electron: { BrowserWindow, ipcMain, session, dialog },
+    service: searchService,
+    i18n: { t: (key, options) => i18n.t(key, options) },
+    logger,
+    allowCapture: captureAllowed({ isPackaged: app.isPackaged }),
+    // A host declined in this window is asked about again the next time it opens.
+    onClosed: () => hostConfirm.forgetDeclined('search')
+  })
+  setSearchWindow(searchWindow)
+  app.on('before-quit', () => searchWindow.dispose())
   const settingsBridge = registerAgentSettingsBridge({
     ipcMain,
     getWebuiContents: () => (window.isDestroyed() ? null : window.webContents),
@@ -364,7 +415,8 @@ module.exports = async function () {
     const wasVisible = old.isVisible()
     const currentUrl = getCurrentWebUiUrl()
     if (currentUrl) url.hash = new URL(currentUrl).hash
-    window = createWindow(agentChat, agentSettingsOn)
+    window = createWindow(agentChat, agentSettingsOn, () => forgetDeclinedHosts())
+    forgetDeclinedHosts()
     // Everything that reads the window through the context follows the current one.
     ctx.replaceProp('webui', window)
     lastLoadedUrl = null

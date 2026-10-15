@@ -1,0 +1,86 @@
+/* Search settings window. Builds on the confirmation windows' tokens (../../confirm/ui/ui.css,
+   Promethity tokens v1): same surfaces, same single accent fill, same focus ring.
+
+   Type sizes follow DESIGN.md's product scale (small 14, body 15, h4 17); ui.css carries the
+   rest as literal px, so the three steps this file uses are named once here. */
+
+:root {
+  --fs-small: 14px;
+  --fs-body: 15px;
+  --fs-title: 17px;
+}
+
+main { max-width: 640px; }
+
+fieldset.panel { border: 0; margin: 0; min-width: 0; }
+fieldset.panel + fieldset.panel, form > fieldset.panel { margin-top: var(--space-3); }
+/* The legend sits inside the panel, not on its top edge: floated, it takes a row of its own. */
+fieldset.panel legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+  margin-bottom: var(--space-2);
+  font: 600 var(--fs-title)/1.3 var(--font-heading);
+  color: var(--text);
+}
+
+fieldset.panel legend + * { clear: both; }
+
+.check.big { font-size: var(--fs-body); color: var(--text); font-weight: 600; min-height: 44px; }
+
+/* D7 (DESIGN.md): a form control draws a 1px inset edge in text-muted, because a fill alone
+   (control on surface, 1.3:1) fails WCAG 2.2 1.4.11. The checkbox is drawn here so its edge
+   and its checked state use the same tokens in both themes. */
+.field input[type='text'] { box-shadow: inset 0 0 0 1px var(--text-muted); }
+.check input[type='checkbox'] {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  border-radius: var(--radius-sm);
+  background: var(--control);
+  box-shadow: inset 0 0 0 1px var(--text-muted);
+  cursor: pointer;
+}
+.check input[type='checkbox']:checked { background: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.check input[type='checkbox']:checked::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  background: var(--on-accent);
+  clip-path: polygon(14% 52%, 0 66%, 38% 100%, 100% 22%, 86% 8%, 38% 72%);
+}
+
+.pick { display: flex; gap: var(--space-2); }
+.pick input { flex: 1; min-width: 0; }
+
+.field label { font-size: var(--fs-small); color: var(--text-muted); }
+.field input[type='text'] { width: 100%; }
+.field input[aria-invalid='true'] { box-shadow: inset 0 0 0 2px var(--err); }
+
+/* A warning always carries its words and a leading marker, never colour alone; the tint pair
+   holds 4.9:1 or better in both themes (see ui.css). */
+.warning {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--warn-tint);
+  color: var(--warn);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.warning::before { content: '! '; font-weight: 700; }
+
+ul.notes { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); color: var(--text-muted); font-size: var(--fs-small); }
+
+/* The status badge can carry a whole sentence (a reason Search is unavailable): let it wrap, and
+   give the long error form a panel radius instead of a pill. */
+.badge { max-width: 100%; white-space: normal; }
+.badge[data-tone='err'] { border-radius: var(--radius-md); }
+
+/* The off state is said in words (#off-hint), never by dimming: the fields stay editable and
+   keep full contrast. */
+.off-hint { margin: 0; padding: var(--space-2) var(--space-3); background: var(--raised); border-radius: var(--radius-sm); color: var(--text); font-size: var(--fs-small); }

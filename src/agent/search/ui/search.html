@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title></title>
+  <link rel="stylesheet" href="../../confirm/ui/ui.css">
+  <link rel="stylesheet" href="search.css">
+</head>
+<body>
+  <!-- No user-facing text lives in this file: the main process sends every string (i18next). -->
+  <main aria-labelledby="title">
+    <div class="status-row">
+      <span id="badge" class="badge" data-tone="warn"></span>
+    </div>
+    <h1 id="title" tabindex="-1" data-s="title"></h1>
+    <p data-s="intro"></p>
+
+    <form id="form" autocomplete="off" novalidate>
+      <label class="check big"><input id="enabled" type="checkbox"> <span data-s="enable"></span></label>
+      <p id="off-hint" class="off-hint" data-s="offHint" hidden></p>
+
+      <fieldset class="panel" id="binaries">
+        <legend data-s="sectionBinaries"></legend>
+        <div class="field">
+          <label for="surreal" data-s="surrealLabel"></label>
+          <div class="pick">
+            <input id="surreal" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="notice">
+            <button id="pick-surreal" type="button" data-s="browse"></button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="xberg" data-s="xbergLabel"></label>
+          <div class="pick">
+            <input id="xberg" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="notice">
+            <button id="pick-xberg" type="button" data-s="browse"></button>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="panel" id="embedder">
+        <legend data-s="sectionEmbedder"></legend>
+        <div class="field">
+          <label for="embedder-url" data-s="embedderUrlLabel"></label>
+          <input id="embedder-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="warn-embedderRemote notice">
+          <p id="warn-embedderRemote" class="warning" hidden></p>
+        </div>
+        <div class="field">
+          <label for="embedder-model" data-s="embedderModelLabel"></label>
+          <input id="embedder-model" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="notice">
+        </div>
+        <div class="field">
+          <label for="embedder-dims" data-s="embedderDimensionsLabel"></label>
+          <input id="embedder-dims" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-describedby="notice">
+        </div>
+      </fieldset>
+
+      <fieldset class="panel" id="describer">
+        <legend data-s="sectionDescriber"></legend>
+        <p class="hint" data-s="describerHint"></p>
+        <div class="field">
+          <label for="describer-url" data-s="describerUrlLabel"></label>
+          <input id="describer-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="warn-describerRemote warn-videoHosted notice">
+          <p id="warn-describerRemote" class="warning" hidden></p>
+        </div>
+        <div class="field">
+          <label for="describer-model" data-s="describerModelLabel"></label>
+          <input id="describer-model" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="notice">
+        </div>
+        <p id="warn-videoHosted" class="warning" hidden></p>
+      </fieldset>
+    </form>
+
+    <ul id="notes" class="notes"></ul>
+
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+    <div class="actions">
+      <button id="close" type="button" data-s="close"></button>
+      <button id="save" type="submit" form="form" class="primary" data-s="save"></button>
+    </div>
+  </main>
+  <script src="search.js"></script>
+</body>
+</html>

@@ -12,6 +12,7 @@
 // window uses (confirm/touchid.js).
 
 const { SettingsApiError } = require('./settings-api')
+const { createHostConfirm, ConfirmRefused } = require('./host-confirm')
 
 const BASE_URL_MAX = 2048
 const PROMPT_MAX = 32768
@@ -73,6 +74,11 @@ function hasCredentials (value) {
 /** @param {string} baseUrl @returns {string} the URL host, lower case, with port */
 function hostOf (baseUrl) {
   return new URL(baseUrl).host.toLowerCase()
+}
+
+/** @param {string} baseUrl @returns {string} scheme, host and port: what ADR-0012 calls the backend host */
+function originOf (baseUrl) {
+  return new URL(baseUrl).origin.toLowerCase()
 }
 
 /**
@@ -172,8 +178,9 @@ function validateClearApiKey (req) {
  *
  * @param {any} body
  * @param {boolean} desktopKey a key written through this bridge is stored in safeStorage
+ * @param {boolean} [desktopCleared] this bridge deleted its stored key because the backend host moved (ADR-0012)
  */
-function readShape (body, desktopKey) {
+function readShape (body, desktopKey, desktopCleared = false) {
   if (!isRecord(body) || !isRevision(body.revision) || !isRecord(body.system_prompt)) {
     throw new BridgeFailure('the agent service answered with settings in an unexpected shape')
   }
@@ -193,11 +200,28 @@ function readShape (body, desktopKey) {
       backend.api_key = b.api_key.set === true ? { set: true, source } : { set: false }
     }
   }
-  return {
+  /** @type {any} */
+  const shaped = {
     revision: body.revision,
     backend,
     system_prompt: { safety_prefix: body.system_prompt.safety_prefix, custom: body.system_prompt.custom ?? '' }
   }
+  // ADR-0012: the stored key was not applied to a moved backend host. Only the reason
+  // string and the cleared flag cross; a Desktop-stored key that this bridge deleted
+  // counts as cleared even when the sidecar, which saw only an environment reference,
+  // did not say so.
+  const server = isRecord(body.key_not_carried) &&
+    typeof body.key_not_carried.reason === 'string' && body.key_not_carried.reason.length <= 64 &&
+    typeof body.key_not_carried.cleared === 'boolean'
+    ? body.key_not_carried
+    : null
+  if (server !== null || desktopCleared) {
+    shaped.key_not_carried = {
+      reason: server?.reason ?? 'host_changed',
+      cleared: (server?.cleared ?? false) || desktopCleared
+    }
+  }
+  return shaped
 }
 
 /**
@@ -212,6 +236,7 @@ function readShape (body, desktopKey) {
  * @param {() => import('../daemon/mcp-sidecar').McpSidecar | null} deps.getSidecar
  * @param {{ hasLlmKey: () => boolean, setLlmKey: (key: string) => void, clearLlmKey: () => void, getLlmKey: () => string | undefined }} deps.secrets
  * @param {Authenticator} deps.authenticate Touch ID (confirm/touchid.js)
+ * @param {ReturnType<typeof createHostConfirm>} [deps.hostConfirm] the shared confirmation gate (src/agent/host-confirm.js); built from authenticate and confirmNative when absent
  * @param {(request: { host: string }) => Promise<boolean>} [deps.confirmNative] the native dialog used when Touch ID is unavailable (confirm/native-dialog.js); without it nothing that needs a confirmation proceeds
  * @param {(key: string, options?: Record<string, unknown>) => string} deps.t
  * @param {{ info: (m: string) => void, warn: (m: string) => void, error?: (m: string) => void }} [deps.logger]
@@ -219,11 +244,14 @@ function readShape (body, desktopKey) {
  * @param {(ms: number) => Promise<void>} [deps.sleep]
  * @param {number} [deps.restartWaitMs] how long a key change waits for the sidecar to be back
  */
-function createSettingsService ({ api, getSidecar, secrets, authenticate, confirmNative, t, logger, now = () => new Date(), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), restartWaitMs = 20000 }) {
+function createSettingsService ({ api, getSidecar, secrets, authenticate, confirmNative, hostConfirm: sharedHostConfirm, t, logger, now = () => new Date(), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), restartWaitMs = 20000 }) {
   /** @type {string | undefined} */
   let lastRevision
   /** @type {{ at: string, ok: boolean, error?: string } | undefined} */
   let applied
+  // One gate for every host decision (one open at a time; a declined host is not asked again
+  // until the window is closed). The Search settings share it when index.js passes one in.
+  const hostConfirm = sharedHostConfirm ?? createHostConfirm({ authenticate, confirmNative, t, logger })
 
   /** Drop any secret this process holds from text that may reach the page or a log. */
   const redact = (/** @type {string} */ text) => {
@@ -333,12 +361,29 @@ function createSettingsService ({ api, getSidecar, secrets, authenticate, confir
    *
    * @param {string} host '' when the change names no host
    * @param {string} touchReason what Touch ID shows
+   * @param {import('./host-confirm').ConfirmOptions} [options]
    */
-  async function confirmHost (host, touchReason) {
-    if (authenticate.available()) return authenticate.prompt(touchReason)
-    logger?.warn('[agent-settings] Touch ID is unavailable on this computer; asking in a native dialog')
-    if (!confirmNative) return false
-    return confirmNative({ host })
+  async function confirmHost (host, touchReason, options) {
+    try {
+      return await hostConfirm.confirm(host, touchReason, options)
+    } catch (err) {
+      if (err instanceof ConfirmRefused) throw new BridgeFailure(err.message)
+      throw err
+    }
+  }
+
+  /**
+   * Whether a set() moves the backend scheme, host or port (ADR-0012). A first backend
+   * write is not a move: nothing was configured before.
+   *
+   * @param {ReturnType<typeof validateSet>} req @param {any} current
+   */
+  function movesBackendHost (req, current) {
+    const next = req.backend?.base_url
+    if (!next || !isRecord(current?.backend)) return false
+    const was = current.backend.base_url
+    if (typeof was !== 'string') return true
+    try { return originOf(next) !== originOf(was) } catch (_) { return true }
   }
 
   /** @param {ReturnType<typeof validateSet>} req @param {any} current */
@@ -355,6 +400,35 @@ function createSettingsService ({ api, getSidecar, secrets, authenticate, confir
     try { return hostOf(b.base_url) } catch (_) { return null }
   }
 
+  /**
+   * Whether the key the settings route reports as set is one the server supplies by
+   * reference rather than the one this bridge stores (which the sidecar sees as an
+   * `environment` source). That key follows a backend host move.
+   *
+   * @param {any} current the settings read shape
+   */
+  function serverKeyFollows (current) {
+    const key = isRecord(current?.backend) && isRecord(current.backend.api_key) ? current.backend.api_key : null
+    if (key === null || key.set !== true) return false
+    return !(secrets.hasLlmKey() && key.source === 'environment')
+  }
+
+  /**
+   * A refused move: put the held key back and restart the sidecar with it. A failure here
+   * is logged and does not replace the error the caller is about to throw.
+   *
+   * @param {string} key
+   */
+  async function restoreKey (key) {
+    try {
+      secrets.setLlmKey(key)
+      logger?.warn('[agent-settings] the backend change was refused; the stored model API key was restored')
+      lastRevision = (await restartSidecar()).revision
+    } catch (err) {
+      logger?.warn(`[agent-settings] the stored model API key could not be fully restored: ${redact(String(/** @type {Error} */(err).message))}`)
+    }
+  }
+
   return {
     async get () {
       const body = await viaApi(() => api.get())
@@ -368,19 +442,53 @@ function createSettingsService ({ api, getSidecar, secrets, authenticate, confir
       const req = validateSet(input)
       return mutation(async () => {
         const current = await currentFor(req.revision)
+        const moves = movesBackendHost(req, current)
         if (needsStrongAuth(req, current)) {
           const host = setHost(req, current)
-          const reason = host ? t('agentSettings.touchReasonHost', { host }) : t('agentSettings.touchReasonBackend')
-          if (!(await confirmHost(host, reason))) throw new BridgeFailure(t('agentSettings.errTouchId'))
+          // A key the server holds by reference (environment, file or flag; not the one
+          // this bridge stores) is applied to the new host by the server, so the person is
+          // told it will be sent. Only the Desktop key is deleted before a move.
+          const keyFollows = moves && serverKeyFollows(current)
+          const reason = keyFollows
+            ? t(host ? 'agentSettings.touchReasonHostKeyFollows' : 'agentSettings.touchReasonBackendKeyFollows', { host })
+            : host ? t('agentSettings.touchReasonHost', { host }) : t('agentSettings.touchReasonBackend')
+          if (!(await confirmHost(host, reason, { purpose: 'backend', keyFollows }))) throw new BridgeFailure(t('agentSettings.errTouchId'))
         }
-        const { revision, ...write } = req
+        const { revision: presented, ...write } = req
+        let revision = presented
         const hadBackend = isRecord(current?.backend)
-        const body = await viaApi(() => api.put(revision, write))
-        let shaped = readShape(body, secrets.hasLlmKey())
+        // ADR-0012: the model key this bridge stores does not follow a backend host move.
+        // The sidecar holds the Desktop key as an environment reference, which the server
+        // leaves alone, so this gate is the only one: delete the key and restart the
+        // sidecar without it before the write, so no request can carry it to the new host.
+        // The key is held in this closure until the write settles; if the write is refused
+        // (409 egress_confirmation_required, 400, 412, a sidecar failure) the old backend
+        // gets its key back, so a refused move never leaves it keyless. A new key is
+        // supplied afterwards through setApiKey.
+        let keyCleared = false
+        /** @type {string | undefined} */
+        let held
+        let body
+        try {
+          if (moves && secrets.hasLlmKey()) {
+            held = secrets.getLlmKey()
+            secrets.clearLlmKey()
+            keyCleared = true
+            logger?.info('[agent-settings] the stored model API key was removed because the backend host changed')
+            revision = (await restartSidecar()).revision
+          }
+          body = await viaApi(() => api.put(revision, write))
+        } catch (err) {
+          if (held !== undefined) await restoreKey(held)
+          throw err
+        } finally {
+          held = undefined
+        }
+        let shaped = readShape(body, secrets.hasLlmKey(), keyCleared)
         // A key staged before any backend existed was not passed to the sidecar (it
         // would not have started); the first backend write picks it up now.
         if (!hadBackend && shaped.backend !== null && secrets.hasLlmKey()) {
-          shaped = readShape(await restartSidecar(), secrets.hasLlmKey())
+          shaped = readShape(await restartSidecar(), secrets.hasLlmKey(), keyCleared)
         }
         lastRevision = shaped.revision
         return shaped
@@ -390,18 +498,10 @@ function createSettingsService ({ api, getSidecar, secrets, authenticate, confir
     /** @param {unknown} input */
     async testConnection (input) {
       const req = validateTestConnection(input)
-      // The probe and the model listing carry the stored model key. To a host that is not
-      // the current backend's, that is a decision for the person: confirm it, naming the
-      // host, before anything is sent. The server also withholds the key from a host it
-      // has not been told is confirmed, and answers "reachable, key not sent" then; that
-      // is an ordinary result here.
-      const candidateHost = hostOf(req.base_url)
-      const current = await viaApi(() => api.get())
-      if (candidateHost !== currentBackendHost(current)) {
-        if (!(await confirmHost(candidateHost, t('agentSettings.touchReasonKeyHost', { host: candidateHost })))) {
-          throw new BridgeFailure(t('agentSettings.errTouchId'))
-        }
-      }
+      // No prompt here: the sidecar withholds the stored model key from a host it has not
+      // been told is confirmed and answers "reachable, key not sent" (`key_sent`), so a
+      // probe of an unknown host sends the page's candidate URL a request and nothing
+      // secret. Deciding where the key may go is the job of set(), which asks.
       const started = Date.now()
       const result = await viaApi(() => api.testConnection(req))
       if (!isRecord(result) || typeof result.ok !== 'boolean') throw new BridgeFailure(t('agentSettings.errUnexpected'))
@@ -480,6 +580,11 @@ function createSettingsService ({ api, getSidecar, secrets, authenticate, confir
       if (lastRevision !== undefined) out.revision = lastRevision
       if (applied) out.applied = { ...applied }
       return out
+    },
+
+    /** The Web UI window was closed or recreated: forget the hosts declined in its life. */
+    forgetDeclined () {
+      hostConfirm.forgetDeclined('backend')
     },
 
     /** The stream saw a new revision: remember it for status(). */
