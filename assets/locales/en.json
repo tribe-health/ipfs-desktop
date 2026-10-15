@@ -359,5 +359,41 @@
     "unpair": "Remove pairing",
     "paired": "Paired",
     "notPaired": "Not paired"
+  },
+  "agentSettingsTray": {
+    "title": "Agent endpoint",
+    "open": "Agent settings...",
+    "enable": "Run the local agent endpoint",
+    "statusRunning": "Running on 127.0.0.1:{{port}}",
+    "status": {
+      "running": "Running",
+      "restarting": "Restarting...",
+      "failing": "Failing to start (see the logs)",
+      "stopped": "Stopped",
+      "starting": "Starting..."
+    }
+  },
+  "agentSettings": {
+    "touchReasonHost": "Send node content to {{host}}",
+    "touchReasonBackend": "Change the agent backend",
+    "errNotRunning": "The local agent endpoint is not running. Turn it on in the tray menu and try again.",
+    "errToken": "The agent endpoint did not accept this app's credentials. Restart IPFS Desktop and try again.",
+    "errRouteAbsent": "The agent endpoint has no settings service. Nothing was changed.",
+    "errRejected": "The agent endpoint refused the change (HTTP {{status}}): {{detail}}",
+    "errStale": "The settings changed since you loaded them. Reload and try again.",
+    "errTouchId": "Touch ID was not completed. Nothing was changed.",
+    "errKeystore": "Secure storage is unavailable on this computer, so the key was not stored.",
+    "errKeyShape": "That key has characters this app cannot store. Nothing was changed.",
+    "errRestart": "The agent endpoint did not come back after the change. Check the logs.",
+    "errUnexpected": "The change could not be applied.",
+    "dialog": {
+      "title": "Confirm on this computer",
+      "messageHost": "Allow the agent to use {{host}}?",
+      "messageBackend": "Allow this change to the agent backend?",
+      "detail": "This computer has no Touch ID. Your node content or your model API key may be sent to this host. Only continue if you started this change yourself.",
+      "confirm": "Allow",
+      "cancel": "Cancel"
+    },
+    "touchReasonKeyHost": "Test the connection to {{host}}"
   }
 }

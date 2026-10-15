@@ -21,6 +21,8 @@ const createToggler = require('./utils/create-toggler')
 const getCtx = require('./context')
 const { getConfirmation } = require('./agent/confirm/registry')
 const { buildAgentConfirmSubmenu } = require('./agent/confirm/tray-menu')
+const { buildAgentEndpointItems } = require('./agent/tray-menu')
+const { getMcpSidecar } = require('./agent/sidecar-registry')
 const DISPLAY_NAME = require('./webui/display-name')
 
 // "Default" lets the user opt back to implicit kubo defaults by nulling
@@ -258,7 +260,14 @@ async function buildMenu () {
         ...buildCidProfileSubmenu(),
         ...buildProvideStrategySubmenu(),
         { type: 'separator' },
-        ...buildAgentConfirmSubmenu({ t: (key) => i18n.t(key), getConfirmation })
+        ...buildAgentConfirmSubmenu({ t: (key) => i18n.t(key), getConfirmation }),
+        { type: 'separator' },
+        ...buildAgentEndpointItems({
+          t: (key, options) => i18n.t(key, options),
+          getSidecar: getMcpSidecar,
+          store,
+          launchWebUI
+        })
       ]
     },
     // @ts-ignore

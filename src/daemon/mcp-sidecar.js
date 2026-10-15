@@ -23,7 +23,9 @@ const MAX_RESTART_ATTEMPTS = 8
 // Child stderr is untrusted text going to the Desktop log: buffer and line caps.
 const STDERR_BUFFER_MAX = 64 * 1024
 const LOG_LINE_MAX = 2048
-const BOUND_ADDRESS_LINE = /serving MCP over HTTP on http:\/\/127\.0\.0\.1:(\d+)\//
+// The whole line, nothing before or after it: a line that merely contains the
+// phrase (a log message quoting it, an echoed request) is not the bound address.
+const BOUND_ADDRESS_LINE = /^ipfs mcp: serving MCP over HTTP on http:\/\/127\.0\.0\.1:(\d+)\/mcp$/
 
 // Environment variable NAMES under which the child reads its credentials. The
 // generated --mcp-config file and the --llm-api-key-env flag reference these
@@ -106,6 +108,18 @@ function createMcpSidecarSecrets ({ safeStorage, store, logger, platform }) {
     isAvailable: () => ui.isAvailable(),
     ensureUiToken: () => ensureToken(ui),
     ensureAdminToken: () => ensureToken(admin),
+    /**
+     * A fresh desktop-admin token for one child, stored as safeStorage ciphertext so
+     * the main process can read it for as long as that child lives. Replaces the previous
+     * child's token: a token that leaked from an earlier run is dead with that run.
+     *
+     * @returns {string}
+     */
+    rotateAdminToken: () => {
+      const value = generateToken()
+      admin.set(value)
+      return value
+    },
     getLlmKey: () => llmKey.get(),
     hasLlmKey: () => llmKey.has(),
     setLlmKey: (key) => llmKey.set(key),
@@ -152,7 +166,10 @@ const ENV_ALLOW = new Set([
   'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TZ',
   'SYSTEMROOT', 'WINDIR', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'COMSPEC', 'PATHEXT',
   'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
-  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR'
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  // The opt-outs the child must see to honour them, and the model and runtime
+  // locations of the content extractor (xberg / onnxruntime).
+  'DO_NOT_TRACK', 'IPFS_TELEMETRY', 'HF_ENDPOINT', 'TESSDATA_PREFIX', 'ORT_DYLIB_PATH'
 ])
 
 /**
@@ -267,7 +284,8 @@ async function discoverPort (preferred) {
  * @property {() => boolean} isRunning
  * @property {() => boolean} hasLiveProcess a child process that has not exited yet, even one being stopped
  * @property {() => void} killNow synchronous SIGKILL of every tracked child (quit last resort)
- * @property {() => 'stopped'|'running'|'restarting'|'failing'} getState
+ * @property {() => Promise<void>} restart stop and start again without touching the off switch store key
+ * @property {() => 'stopped'|'starting'|'running'|'restarting'|'failing'} getState 'starting' is a spawned child that has not reported its bound address
  * @property {() => number} getPort the port the child reported binding, else the one it was told to bind
  * @property {() => number|undefined} childPid
  */
@@ -354,12 +372,10 @@ function createMcpSidecar (options = {}) {
       throw new Error('secure storage (safeStorage) is unavailable; the MCP sidecar cannot store its principal tokens and is not started')
     }
     const uiToken = secrets.ensureUiToken()
-    const adminToken = secrets.ensureAdminToken()
     if (uiToken.generated) log.info('[mcp-sidecar] generated the ui principal token (stored as safeStorage ciphertext)')
-    if (adminToken.generated) log.info('[mcp-sidecar] generated the admin principal token (stored as safeStorage ciphertext)')
+    // The admin token is not set here: every spawn gets a fresh one (spawnChild).
     secretEnv = {
-      [SIDECAR_ENV.UI_TOKEN]: uiToken.value,
-      [SIDECAR_ENV.ADMIN_TOKEN]: adminToken.value
+      [SIDECAR_ENV.UI_TOKEN]: uiToken.value
     }
     const llmKey = secrets.getLlmKey()
     hasLlmKey = llmKey !== undefined
@@ -390,16 +406,32 @@ function createMcpSidecar (options = {}) {
     }
   }
 
+  /** Children whose bound address was already taken: only the first report counts. */
+  const boundSeen = new WeakSet()
+  /**
+   * The child whose bound-address line arrived. A child is 'starting' until it is this
+   * one: before that line the port is only a request, and something else may hold it, so
+   * nothing may be sent to it (the settings bearer least of all).
+   *
+   * @type {import('child_process').ChildProcess|null}
+   */
+  let boundChild = null
+
   /** Cap a line from the child before it reaches the Desktop log. */
   const logChildLine = (line, expectedPort, proc) => {
     const text = line.length > LOG_LINE_MAX ? `${line.slice(0, LOG_LINE_MAX)} [truncated]` : line
     log.info(`[mcp-sidecar] ${text}`)
     // The child's own report of where it bound is the single source for
     // getPort(); everything else in Desktop reads that, not the requested port.
-    // (A child that is being stopped no longer speaks for the sidecar.)
-    const bound = child === proc ? BOUND_ADDRESS_LINE.exec(line) : null
+    // Only the current child speaks, only while the sidecar is 'running', and
+    // only once: a later line cannot move the port the window was built for.
+    if (child !== proc || failing || boundSeen.has(proc)) return
+    const bound = BOUND_ADDRESS_LINE.exec(line)
     if (!bound) return
     const reported = Number(bound[1])
+    if (!Number.isInteger(reported) || reported < 1 || reported > 65535) return
+    boundSeen.add(proc)
+    boundChild = proc
     if (reported !== expectedPort) {
       log.warn(`[mcp-sidecar] ipfs mcp reported port ${reported}, expected ${expectedPort}; using the reported port`)
     }
@@ -409,11 +441,19 @@ function createMcpSidecar (options = {}) {
   const spawnChild = () => {
     let proc
     try {
-      // Allowlisted inherited environment first, then the repo and operator
-      // extras, then the credentials last: nothing inherited or configured can
-      // override a principal token.
+      // A fresh desktop-admin token per child, still held as safeStorage ciphertext.
+      secretEnv = { ...secretEnv, [SIDECAR_ENV.ADMIN_TOKEN]: secrets.rotateAdminToken() }
+    } catch (err) {
+      log.error(`[mcp-sidecar] could not create the admin token: ${err}`)
+      scheduleRestart()
+      return
+    }
+    try {
+      // Allowlisted inherited environment first, then the operator extras, then
+      // the repo, then the credentials last: nothing inherited or configured
+      // can override the repo the child reaches or a principal token.
       proc = spawnFn(binPath, args(), {
-        env: { ...buildChildEnv(inheritedEnv), IPFS_PATH: repoPath, ...extraEnv, ...secretEnv },
+        env: { ...buildChildEnv(inheritedEnv), ...extraEnv, IPFS_PATH: repoPath, ...secretEnv },
         stdio: ['ignore', 'ignore', 'pipe']
       })
     } catch (err) {
@@ -617,6 +657,20 @@ function createMcpSidecar (options = {}) {
     },
 
     /**
+     * Stop and start the child again without touching the persisted off switch (a new
+     * key is applied this way). A no-op while no daemon gave a repo path. The start
+     * still honours the off switch: a sidecar the operator turned off stays off.
+     *
+     * @returns {Promise<void>}
+     */
+    async restart () {
+      const path = repoPath
+      if (path === null) return
+      await halt()
+      await this.start(path)
+    },
+
+    /**
      * Last resort at quit: SIGKILL every tracked child synchronously. Only PIDs
      * this supervisor spawned and that have not exited are signalled.
      */
@@ -641,7 +695,7 @@ function createMcpSidecar (options = {}) {
     hasLiveProcess: () => live.size > 0,
     getState: () => {
       if (failing) return 'failing'
-      if (child) return 'running'
+      if (child) return boundChild === child ? 'running' : 'starting'
       return active ? 'restarting' : 'stopped'
     },
     getPort: () => port,

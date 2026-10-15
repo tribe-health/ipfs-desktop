@@ -1,3 +1,4 @@
+/* global Response, AbortController */
 const { EventEmitter } = require('events')
 const net = require('net')
 const { test, expect } = require('@playwright/test')
@@ -165,6 +166,9 @@ test.describe('mcp sidecar supervision', () => {
     expect(spawns[0].options.env.IPFS_PATH).toEqual('/repo')
     expect(spawns[0].options.stdio).toEqual(['ignore', 'ignore', 'pipe'])
     expect(sidecar.isRunning()).toBe(true)
+    // A spawned child is only 'starting' until it prints its own bound address.
+    expect(sidecar.getState()).toEqual('starting')
+    spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:5050/mcp\n'))
     expect(sidecar.getState()).toEqual('running')
     expect(sidecar.getPort()).toEqual(5050)
   })
@@ -223,11 +227,56 @@ test.describe('mcp sidecar supervision', () => {
     spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:5050/mcp\n'))
     expect(sidecar.getPort()).toEqual(5050)
     expect(warns.length).toEqual(0)
+    await sidecar.stop()
+
+    // A child that reports another port than the one it was told to bind wins, with a warning.
+    const second = setup()
+    await second.sidecar.start('/repo')
+    second.spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/mcp\n'))
+    expect(second.sidecar.getPort()).toEqual(41999)
+    expect(second.warns.some(m => m.includes('41999') && m.includes('5050'))).toBe(true)
+    await second.sidecar.stop()
+  })
+
+  test('only the first bound-address line of a child counts', async () => {
+    const { sidecar, spawns } = setup()
+    await sidecar.start('/repo')
 
     spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/mcp\n'))
     expect(sidecar.getPort()).toEqual(41999)
-    expect(warns.some(m => m.includes('41999') && m.includes('5050'))).toBe(true)
+    spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:42000/mcp\n'))
+    expect(sidecar.getPort()).toEqual(41999)
     await sidecar.stop()
+  })
+
+  test('the bound-address line is anchored to the exact line', async () => {
+    const lines = [
+      'note: ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/mcp',
+      'ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/mcp and more',
+      'ipfs mcp: serving MCP over HTTP on http://0.0.0.0:41999/mcp',
+      'ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/',
+      'ipfs mcp: serving MCP over HTTP on http://127.0.0.1:99999/mcp',
+      'ipfs mcp: serving MCP over HTTP on http://127.0.0.1:0/mcp'
+    ]
+    for (const line of lines) {
+      const { sidecar, spawns } = setup()
+      await sidecar.start('/repo')
+      spawns[0].child.stderr.emit('data', Buffer.from(line + '\n'))
+      expect(sidecar.getPort()).toEqual(5050)
+      await sidecar.stop()
+    }
+  })
+
+  test('a bound-address line is not read once the sidecar stopped being running', async () => {
+    const { sidecar, spawns } = setup()
+    await sidecar.start('/repo')
+    const first = spawns[0].child
+
+    const stopping = sidecar.stop()
+    expect(sidecar.getState()).toEqual('stopped')
+    first.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://127.0.0.1:41999/mcp\n'))
+    await stopping
+    expect(sidecar.getPort()).toEqual(5050)
   })
 
   test('restarts with exponential backoff after an unexpected exit', async () => {
@@ -290,7 +339,7 @@ test.describe('mcp sidecar supervision', () => {
     // The next start (daemon restart or toggle) tries again from a clean slate.
     await sidecar.stop()
     await sidecar.start('/repo')
-    expect(sidecar.getState()).toEqual('running')
+    expect(sidecar.getState()).toEqual('starting')
     expect(spawns.length).toEqual(5)
     await sidecar.stop()
   })
@@ -534,7 +583,7 @@ test.describe('principal tokens and secrets', () => {
     }
     const { sidecar, spawns } = setup({
       env,
-      extraEnv: { EXTRA_FLAG: '1', [NAMES.ui]: 'extra-ui-token' }
+      extraEnv: { EXTRA_FLAG: '1', IPFS_PATH: '/extra-repo', [NAMES.ui]: 'extra-ui-token' }
     })
 
     await sidecar.start('/repo')
@@ -553,6 +602,17 @@ test.describe('principal tokens and secrets', () => {
     // No LLM key stored: the inherited one must not leak through.
     expect(childEnv[NAMES.llm]).toBeUndefined()
     await sidecar.stop()
+  })
+
+  test('the allowlist passes the opt-outs and the extractor runtime variables, nothing else new', () => {
+    const { buildChildEnv } = proxyquire('../../src/daemon/mcp-sidecar', {
+      electron: { app: { getPath: () => '/userdata' } },
+      '../common/logger': { info () {}, warn () {}, error () {} },
+      '../custom-ipfs-binary': { getCustomBinary: () => null }
+    })
+    const names = ['DO_NOT_TRACK', 'IPFS_TELEMETRY', 'HF_ENDPOINT', 'TESSDATA_PREFIX', 'ORT_DYLIB_PATH']
+    const inherited = Object.fromEntries(names.map((n) => [n, 'v-' + n]))
+    expect(buildChildEnv({ ...inherited, HF_TOKEN: 'secret', OPENAI_API_KEY: 'secret' })).toEqual(inherited)
   })
 
   test('the environment allowlist matches Windows names case-insensitively', () => {
@@ -862,5 +922,131 @@ test.describe('daemon lifecycle wiring', () => {
     await until(() => errors.length > 0)
 
     expect(errors[0]).toContain('boom')
+  })
+})
+
+test.describe('starting state, per-spawn admin token and restart', () => {
+  const BOUND = (port) => Buffer.from(`ipfs mcp: serving MCP over HTTP on http://127.0.0.1:${port}/mcp\n`)
+  const NAME = 'IPFS_MCP_DESKTOP_ADMIN_TOKEN'
+  const { createSettingsApi } = require('../../src/agent/settings-api')
+  const { sidecarBaseUrl } = require('../../src/agent/sidecar-registry')
+
+  test('a child is starting until its own bound-address line arrives, then running', async () => {
+    const { sidecar, spawns } = setup()
+    await sidecar.start('/repo')
+    expect(sidecar.getState()).toEqual('starting')
+    expect(sidecar.isRunning()).toBe(true)
+
+    // Anything else on stderr, including a near miss, does not end the starting state.
+    spawns[0].child.stderr.emit('data', Buffer.from('ipfs mcp: serving MCP over HTTP on http://0.0.0.0:5050/mcp\nlistening soon\n'))
+    expect(sidecar.getState()).toEqual('starting')
+
+    spawns[0].child.stderr.emit('data', BOUND(5050))
+    expect(sidecar.getState()).toEqual('running')
+    await sidecar.stop()
+  })
+
+  test('a restarted child is starting again; the previous child bound line does not carry over', async () => {
+    const { sidecar, spawns, clock } = setup({ backoffInitialMs: 10, backoffResetMs: 60000 })
+    await sidecar.start('/repo')
+    spawns[0].child.stderr.emit('data', BOUND(5050))
+    expect(sidecar.getState()).toEqual('running')
+
+    spawns[0].child.emit('exit', 1, null)
+    expect(sidecar.getState()).toEqual('restarting')
+    clock.fire()
+    await until(() => spawns.length === 2)
+    expect(sidecar.getState()).toEqual('starting')
+
+    // A late line from the dead child is not the new child's.
+    spawns[0].child.stderr.emit('data', BOUND(5050))
+    expect(sidecar.getState()).toEqual('starting')
+    spawns[1].child.stderr.emit('data', BOUND(5050))
+    expect(sidecar.getState()).toEqual('running')
+    await sidecar.stop()
+  })
+
+  test('without the bound line no settings call is made, and the bearer goes nowhere', async () => {
+    const { sidecar, spawns } = setup()
+    const fetched = []
+    const api = createSettingsApi({
+      getBaseUrl: () => sidecarBaseUrl(sidecar, true),
+      getAdminToken: () => 'admin-token-from-the-store',
+      fetchFn: async (url, init) => { fetched.push([url, init]); return new Response('{}', { status: 200 }) }
+    })
+
+    await sidecar.start('/repo')
+    expect(spawns.length).toEqual(1)
+    for (const call of [() => api.get(), () => api.put('r1', {}), () => api.testConnection({ base_url: 'https://x.example' }), () => api.listModels('https://x.example'), () => api.streamEvents(() => {}, new AbortController().signal)]) {
+      const err = await call().catch(e => e)
+      expect(err.message).toContain('not running')
+    }
+    expect(fetched).toEqual([])
+
+    spawns[0].child.stderr.emit('data', BOUND(5050))
+    await api.get()
+    expect(fetched.length).toEqual(1)
+    expect(fetched[0][0]).toEqual('http://127.0.0.1:5050/agent/settings')
+    await sidecar.stop()
+  })
+
+  test('every spawn gets a fresh admin token, held as ciphertext for that child', async () => {
+    const safeStorage = fakeSafeStorage()
+    const store = fakeStore()
+    const { sidecar, spawns, clock } = setup({ safeStorage, store, backoffInitialMs: 10, backoffResetMs: 60000 })
+    const stored = () => safeStorage.decryptString(Buffer.from(store.data.get('mcpSidecar.adminTokenCipher'), 'base64'))
+
+    await sidecar.start('/repo')
+    const first = spawns[0].options.env[NAME]
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(stored()).toEqual(first)
+
+    spawns[0].child.emit('exit', 1, null)
+    clock.fire()
+    await until(() => spawns.length === 2)
+    const second = spawns[1].options.env[NAME]
+    expect(second).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(second).not.toEqual(first)
+    expect(stored()).toEqual(second)
+    // The ui token is not rotated by a respawn.
+    expect(spawns[1].options.env.IPFS_MCP_DESKTOP_UI_TOKEN).toEqual(spawns[0].options.env.IPFS_MCP_DESKTOP_UI_TOKEN)
+    // Ciphertext only in the store file.
+    expect(JSON.stringify([...store.data.entries()])).not.toContain(second)
+    await sidecar.stop()
+  })
+
+  test('restart stops and starts the child without writing the off switch', async () => {
+    const safeStorage = fakeSafeStorage()
+    const store = fakeStore()
+    const writes = []
+    const recording = { ...store, set: (k, v) => { writes.push(k); store.set(k, v) } }
+    const { sidecar, spawns } = setup({ safeStorage, store: recording })
+
+    await sidecar.start('/repo')
+    spawns[0].child.stderr.emit('data', BOUND(5050))
+    writes.length = 0
+
+    await sidecar.restart()
+    expect(spawns[0].child.killCalls).toEqual(['SIGTERM'])
+    expect(spawns.length).toEqual(2)
+    expect(writes).not.toContain('mcpSidecar.enabled')
+    expect(store.data.has('mcpSidecar.enabled')).toBe(false)
+    expect(sidecar.getState()).toEqual('starting')
+    expect(spawns[1].options.env[NAME]).not.toEqual(spawns[0].options.env[NAME])
+    await sidecar.stop()
+  })
+
+  test('restart does nothing before a daemon gave a repo, and keeps an operator off switch off', async () => {
+    const idle = setup()
+    await idle.sidecar.restart()
+    expect(idle.spawns.length).toEqual(0)
+
+    const store = fakeStore()
+    const { sidecar, spawns } = setup({ store })
+    await sidecar.start('/repo')
+    store.set('mcpSidecar.enabled', false)
+    await sidecar.restart()
+    expect(spawns.length).toEqual(1)
+    expect(sidecar.getState()).toEqual('stopped')
   })
 })

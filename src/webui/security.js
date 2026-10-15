@@ -73,7 +73,23 @@ function originFromMultiaddr (addr) {
  * @property {string | null | undefined} [apiOrigin] the node's RPC origin
  * @property {string | null | undefined} [gatewayOrigin] the node's gateway origin
  * @property {string | null | undefined} [mcpOrigin] the `ipfs mcp` origin; only when the agent chat is on
+ * @property {string | null | undefined} [sidecarOrigin] the supervised `ipfs mcp` sidecar's loopback origin; only while the agent settings bridge is on and the sidecar runs
  */
+
+const LOOPBACK_HTTP_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/
+
+/**
+ * Like toHttpOrigin, but only for a plain-http loopback origin with a port: the one shape
+ * the Desktop-supervised sidecar can have. Anything else, a remote host or https included,
+ * yields null, so no value can widen the policy beyond this computer.
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function toLoopbackOrigin (value) {
+  const origin = toHttpOrigin(value)
+  return origin !== null && LOOPBACK_HTTP_ORIGIN.test(origin) ? origin : null
+}
 
 /**
  * The policy for `webui://localhost`. `script-src 'self'` with no `unsafe-eval` and no
@@ -84,10 +100,11 @@ function originFromMultiaddr (addr) {
  * @param {CspSources} sources
  * @returns {string}
  */
-function buildCsp ({ apiOrigin, gatewayOrigin, mcpOrigin } = {}) {
+function buildCsp ({ apiOrigin, gatewayOrigin, mcpOrigin, sidecarOrigin } = {}) {
   const api = toHttpOrigin(apiOrigin)
   const gateway = toHttpOrigin(gatewayOrigin)
   const mcp = toHttpOrigin(mcpOrigin)
+  const sidecar = toLoopbackOrigin(sidecarOrigin)
   const list = (/** @type {Array<string | null>} */ ...origins) => [...new Set(origins.filter(Boolean))].join(' ')
 
   return [
@@ -97,7 +114,7 @@ function buildCsp ({ apiOrigin, gatewayOrigin, mcpOrigin } = {}) {
     `img-src ${list("'self'", 'data:', 'blob:', gateway)}`,
     `media-src ${list("'self'", 'blob:', gateway)}`,
     "font-src 'self' data:",
-    `connect-src ${list("'self'", api, gateway, mcp)}`,
+    `connect-src ${list("'self'", api, gateway, mcp, sidecar)}`,
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     "frame-src 'none'",
@@ -154,4 +171,4 @@ function webPreferences ({ preload, additionalArguments = [], allowNodeIntegrati
   }
 }
 
-module.exports = { WEBUI_ORIGIN, isWebUiUrl, toHttpOrigin, originFromMultiaddr, buildCsp, installCsp, webPreferences }
+module.exports = { WEBUI_ORIGIN, isWebUiUrl, toHttpOrigin, toLoopbackOrigin, originFromMultiaddr, buildCsp, installCsp, webPreferences }

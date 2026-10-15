@@ -188,6 +188,24 @@ pairing flow in task 1.4, which depends on `native-confirmation-prompt`. `tokenS
 the call it will use. I deliberately did not add a tray item or a renderer setter: a renderer
 that can set the token or the endpoint can widen its own CSP.
 
+### Off switches of the agent endpoint and its settings bridge
+
+Both are Desktop store keys in `config.json` (tray: Advanced, Open config file). They are
+plain booleans, on by default, and only the literal `false` turns a feature off. Both are
+read at launch (the bridge) or applied live (the sidecar), as noted.
+
+| Key | What `false` removes | How to set it |
+|-----|----------------------|---------------|
+| `mcpSidecar.enabled` | The supervised `ipfs mcp` child: no process, no bound port, no desktop-ui or desktop-admin principal in use, so nothing for the settings bridge to talk to. The tray item "Run the local agent endpoint" writes this key and applies it at once; a hand edit takes effect on the next sidecar start. | Tray: untick "Run the local agent endpoint", or `"mcpSidecar": { "enabled": false }` in `config.json`. |
+| `agentSettings.enabled` | The settings bridge: the window is created without the `--ipfs-desktop-agent-settings=1` flag, so `window.ipfsDesktop.agentSettings` does not exist; no `ipcMain.handle` channel for it is registered; the change stream to the sidecar is never opened; the sidecar's loopback origin is not added to the CSP. The sidecar itself keeps running (it is `mcpSidecar.enabled` that stops it). | `"agentSettings": { "enabled": false }` in `config.json`, then restart IPFS Desktop (read once per launch). |
+
+With `mcpSidecar.enabled` false every bridge call answers that the local agent endpoint is not running. Both disabled states are covered by
+`test/unit/agent-settings-bridge.spec.js`.
+
+The sidecar reports a `starting` state from the spawn until the child prints its bound address.
+In that window the bridge sends nothing to the port (the port is a request, not yet a fact), and
+every spawn gets a fresh `desktop-admin` token, held as safeStorage ciphertext for the life of that child.
+
 ### Where the token is, and is not
 
 - In the main process, in memory, only while a handler is answering.

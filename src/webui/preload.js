@@ -3,7 +3,7 @@
 // A sandboxed preload can require only `electron` and a few Node built-ins, never a
 // relative file, so everything it needs is here. Values the main process owns arrive as
 // command-line arguments (additionalArguments); event and channel names are copies that
-// test/unit/preload.spec.js checks against src/common/ipc-main-events.js and
+// test/unit/agent-settings-bridge.spec.js checks against src/common/ipc-main-events.js and
 // src/agent/consts.js.
 const { ipcRenderer, contextBridge } = require('electron')
 
@@ -19,6 +19,16 @@ const AGENT_CHAT_CHANNELS = Object.freeze({
   GET_TOKEN: 'ipfs-desktop:agent-chat:get-token'
 })
 const ARG_AGENT_CHAT = '--ipfs-desktop-agent-chat=1'
+const AGENT_SETTINGS_CHANNELS = Object.freeze({
+  GET: 'ipfsDesktop.agentSettings.get',
+  SET: 'ipfsDesktop.agentSettings.set',
+  TEST_CONNECTION: 'ipfsDesktop.agentSettings.testConnection',
+  SET_API_KEY: 'ipfsDesktop.agentSettings.setApiKey',
+  CLEAR_API_KEY: 'ipfsDesktop.agentSettings.clearApiKey',
+  STATUS: 'ipfsDesktop.agentSettings.status',
+  ON_CHANGE: 'ipfsDesktop.agentSettings.onChange'
+})
+const ARG_AGENT_SETTINGS = '--ipfs-desktop-agent-settings=1'
 
 /** @param {string} name */
 const argValue = (name) => {
@@ -93,8 +103,43 @@ const makeAgentChatBridge = () => Object.freeze({
 })
 const agentChat = process.argv.includes(ARG_AGENT_CHAT) ? makeAgentChatBridge() : undefined
 
+// The agent settings bridge (the SettingsClient contract, mcp/contract/settings/client),
+// present only when the main process created this window with the settings flag. Every
+// call goes to the main process, which answers the Web UI's main frame alone and runs the
+// setters itself. The key is passed in and never handed back: no method returns it and no
+// event carries it. A rejection is either the contract's `{error: {code, message}}` object
+// or an Error with a plain message.
+const unwrapSettings = async (/** @type {Promise<any>} */ pending) => {
+  const res = await pending
+  if (res === null || res === undefined) throw new Error('The agent settings are not available here.')
+  if (res.ok === true) return res.value
+  if (res.error) throw res.error
+  throw new Error(typeof res.message === 'string' ? res.message : 'The change could not be applied.')
+}
+const makeAgentSettingsBridge = () => Object.freeze({
+  get: () => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.GET)),
+  set: (req) => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.SET, req)),
+  testConnection: (req) => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.TEST_CONNECTION, req)),
+  setApiKey: (req) => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.SET_API_KEY, req)),
+  clearApiKey: (req) => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.CLEAR_API_KEY, req)),
+  status: () => unwrapSettings(ipcRenderer.invoke(AGENT_SETTINGS_CHANNELS.STATUS)),
+  onChange: (onEvent) => {
+    if (typeof onEvent !== 'function') throw new TypeError('onChange needs a function')
+    const listener = (_event, payload) => {
+      // Only the contract's event reaches the page, and only its two fields.
+      if (payload && payload.type === 'settings_changed' && typeof payload.revision === 'string') {
+        onEvent({ type: 'settings_changed', revision: payload.revision })
+      }
+    }
+    ipcRenderer.on(AGENT_SETTINGS_CHANNELS.ON_CHANGE, listener)
+    return () => { ipcRenderer.removeListener(AGENT_SETTINGS_CHANNELS.ON_CHANGE, listener) }
+  }
+})
+const agentSettings = process.argv.includes(ARG_AGENT_SETTINGS) ? makeAgentSettingsBridge() : undefined
+
 contextBridge.exposeInMainWorld('ipfsDesktop', {
   ...(agentChat === undefined ? {} : { agentChat }),
+  ...(agentSettings === undefined ? {} : { agentSettings }),
 
   countlyAppKey: COUNTLY_KEY,
 
