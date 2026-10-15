@@ -9,7 +9,7 @@ const { readSearchSettings, searchHosts } = require('../../daemon/mcp-sidecar-se
  * @typedef {object} SearchView
  * @property {boolean} enabled
  * @property {{ surrealBinary: string, xbergBinary: string, embedderUrl: string, embedderModel: string, embedderDimensions: string, describerUrl: string, describerModel: string }} fields
- * @property {{ state: 'off' | 'on' | 'unavailable', message: string }} status
+ * @property {{ state: 'off' | 'on' | 'pending' | 'unavailable', message: string }} status
  * @property {{ id: string, text: string }[]} warnings shown beside the field they belong to
  * @property {{ id: string, text: string }[]} notes always-visible facts (cost, limits)
  * @property {boolean} bulkPaused a bulk run was running when the settings last changed and is now paused
@@ -47,7 +47,7 @@ function buildSearchView ({ store, searchState, bulkPaused = false, t }) {
     status = { state: 'on', message: t('agentSearch.status.on') }
   } else {
     // Switched on, and the sidecar has not applied it yet (not running, or not restarted).
-    status = { state: 'unavailable', message: t('agentSearch.status.pending') }
+    status = { state: 'pending', message: t('agentSearch.status.pending') }
   }
 
   return {

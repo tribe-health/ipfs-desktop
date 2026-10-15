@@ -146,6 +146,7 @@ function egressAck (settings) {
 /**
  * @typedef {object} SearchFs
  * @property {typeof nodeFs.statSync} statSync
+ * @property {typeof nodeFs.realpathSync} [realpathSync] resolves symlinks; absent in a stub, then the path is taken as it is
  * @property {typeof nodeFs.accessSync} accessSync
  * @property {typeof nodeFs.mkdirSync} mkdirSync
  *
@@ -184,7 +185,15 @@ function ensurePrivateDir (dir, fs, uid) {
  */
 function isTrustedProgram (path, fs, uid) {
   if (uid === null) return true
-  for (const target of [path, dirname(path)]) {
+  // A symlink the user owns can point at a program in a folder others write to: judge the
+  // program that would run (the resolved path) and its real folder, and the link as named.
+  let real = path
+  try {
+    real = typeof fs.realpathSync === 'function' ? fs.realpathSync(path) : path
+  } catch (_) {
+    return false
+  }
+  for (const target of new Set([path, dirname(path), real, dirname(real)])) {
     let st
     try {
       st = fs.statSync(target)

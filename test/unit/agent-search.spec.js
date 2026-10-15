@@ -739,7 +739,9 @@ test.describe('round 6 correction: the Search window (H2, M4, M6, L7, I1)', () =
   test('H2: no opacity dimming, a D7 edge on every text input and on the checkbox, in the window stylesheet', () => {
     const css = fs.readFileSync(path.join(__dirname, '../../src/agent/search/ui/search.css'), 'utf8')
     expect(css).not.toMatch(/opacity/)
-    expect(css).toMatch(/\.field input\[type='text'\]\s*\{\s*box-shadow:\s*inset 0 0 0 1px var\(--text-muted\)/)
+    // Round 7: the text inputs' D7 edge moved to the shared sheet (an outline, since that sheet forbids shadows).
+    const shared = fs.readFileSync(path.join(__dirname, '../../src/agent/confirm/ui/ui.css'), 'utf8')
+    expect(shared).toMatch(/\.field input\[type='text'\] \{[^}]*outline:\s*1px solid var\(--text-muted\)/)
     expect(css).toMatch(/\.check input\[type='checkbox'\][^}]*box-shadow:\s*inset 0 0 0 1px var\(--text-muted\)/)
     // Sizes come from the named steps, not stray literals.
     expect(css.replace(/:root\s*\{[^}]*\}/, '')).not.toMatch(/font-size:\s*\d+px/)
@@ -862,5 +864,87 @@ test.describe('round 6 correction: the generated embeddings block against the co
       expect(validate({ embeddings: result.embeddings }), JSON.stringify(validate.errors)).toBe(true)
       expect(validate({ embeddings: { ...result.embeddings, unknown_key: 1 } })).toBe(false)
     }
+  })
+})
+
+test.describe('round 7 residuals: pending state, copy, notice placement, one accent, symlinks (1.7)', () => {
+  const UI = path.join(__dirname, '..', '..', 'src', 'agent', 'search', 'ui')
+  const rd = (...p) => fs.readFileSync(path.join(...p), 'utf8')
+  const searchJs = rd(UI, 'search.js')
+  const searchCss = rd(UI, 'search.css')
+  const searchHtml = rd(UI, 'search.html')
+  const uiCss = rd(__dirname, '..', '..', 'src', 'agent', 'confirm', 'ui', 'ui.css')
+
+  test('L-b: on but not yet applied is the pending state, not an unavailable one, with its words', () => {
+    const store = storeFor(tmp())
+    const v = buildSearchView({ store, searchState: null, t })
+    expect(v.status.state).toEqual('pending')
+    expect(v.status.message).toEqual('Search is on and will start with the agent endpoint.')
+    // A reason from the endpoint is still the unavailable (error) state.
+    expect(buildSearchView({ store, searchState: { state: 'unavailable', reason: 'binary_missing', detail: 'xberg' }, t }).status.state).toEqual('unavailable')
+  })
+
+  test('L-b: the window gives pending and off a warn tone and only unavailable the err tone', () => {
+    const map = /const BADGE_TONE = (\{[^}]*\})/.exec(searchJs)
+    expect(map).not.toBeNull()
+    // eslint-disable-next-line no-new-func
+    expect(new Function(`return ${map[1]}`)()).toEqual({ on: 'ok', off: 'warn', pending: 'warn', unavailable: 'err' })
+    expect(searchJs).toContain("BADGE_TONE[view.status.state] || 'err'")
+  })
+
+  test('L-c: the intro does not say Search is off while it can be on', () => {
+    expect(en.agentSearch.intro).not.toMatch(/off until|turn it on/i)
+    expect(en.agentSearch.intro).toMatch(/index of the files on this node/)
+    expect(en.agentSearch.offHint).toMatch(/^Search is off\./)
+  })
+
+  test('L-d: the notice comes before the notes, and a refusal that names a field puts it under that field', () => {
+    expect(searchHtml.indexOf('id="notice"')).toBeGreaterThan(0)
+    expect(searchHtml.indexOf('id="notice"')).toBeLessThan(searchHtml.indexOf('id="notes"'))
+    expect(searchJs).toContain('holder.after(notice)')
+    expect(searchJs).toContain("say('err', (result && result.message) || S.errFailed, result && result.field)")
+    expect(searchJs).toContain('NOTICE_HOME.before(notice)')
+  })
+
+  test('L-e: the checked checkbox uses the text fill; the accent is left to the one primary button', () => {
+    const rule = /\.check input\[type='checkbox'\]:checked \{[^}]*\}/.exec(searchCss)[0]
+    expect(rule).toContain('var(--text)')
+    expect(rule).not.toContain('--accent')
+    expect(/:checked::before \{[^}]*\}/.exec(searchCss)[0]).toContain('var(--ground)')
+    expect(searchCss).not.toMatch(/background:\s*var\(--accent\)/)
+    expect(searchHtml.match(/class="primary"/g)).toHaveLength(1)
+  })
+
+  test('FYI: the shared inputs carry the D7 edge as an outline, in the stylesheet that forbids shadows', () => {
+    expect(uiCss).not.toMatch(/\bbox-shadow\b/)
+    const rule = /\.field input\[type='password'\], \.field input\[type='text'\] \{[^}]*\}/.exec(uiCss)[0]
+    expect(rule).toContain('outline: 1px solid var(--text-muted)')
+    expect(rule).toContain('outline-offset: -1px')
+    // The focus ring still wins on focus.
+    expect(uiCss).toMatch(/\[type='text'\]:focus-visible \{ outline: 2px solid var\(--accent\)/)
+  })
+
+  test('security L4: a symlink to a program in a folder others can write is refused; one to a private folder is accepted', () => {
+    const dir = tmp()
+    const open = fs.mkdtempSync(path.join(os.tmpdir(), 'dsearch-open-'))
+    fs.chmodSync(open, 0o777)
+    const target = program(open, 'xberg')
+    const link = path.join(dir, 'xberg-link')
+    fs.symlinkSync(target, link)
+    const settings = readSearchSettings(storeFor(dir, { [SEARCH_KEYS.XBERG_BINARY]: link }))
+    // The link and its own folder are private; only the real folder is not.
+    expect(buildSearchConfig({ settings, searchDir: path.join(dir, 'search') })).toMatchObject({ ok: false, reason: 'binary_unsafe', detail: 'xberg' })
+    const safe = tmp()
+    const okLink = path.join(dir, 'xberg-ok')
+    fs.symlinkSync(program(safe, 'xberg'), okLink)
+    const okSettings = readSearchSettings(storeFor(dir, { [SEARCH_KEYS.XBERG_BINARY]: okLink }))
+    expect(buildSearchConfig({ settings: okSettings, searchDir: path.join(dir, 'search') }).ok).toBe(true)
+  })
+
+  test('security L4: a program whose real path cannot be resolved is refused', () => {
+    const dir = tmp()
+    const settings = readSearchSettings(storeFor(dir))
+    const broken = { ...fs, realpathSync: () => { throw new Error('ELOOP') }, mkdirSync: fs.mkdirSync, accessSync: fs.accessSync }
+    expect(buildSearchConfig({ settings, searchDir: path.join(dir, 'search'), fs: broken })).toMatchObject({ ok: false, reason: 'binary_unsafe' })
   })
 })

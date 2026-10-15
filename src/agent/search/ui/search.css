@@ -29,9 +29,8 @@ fieldset.panel legend + * { clear: both; }
 .check.big { font-size: var(--fs-body); color: var(--text); font-weight: 600; min-height: 44px; }
 
 /* D7 (DESIGN.md): a form control draws a 1px inset edge in text-muted, because a fill alone
-   (control on surface, 1.3:1) fails WCAG 2.2 1.4.11. The checkbox is drawn here so its edge
-   and its checked state use the same tokens in both themes. */
-.field input[type='text'] { box-shadow: inset 0 0 0 1px var(--text-muted); }
+   (control on surface, 1.3:1) fails WCAG 2.2 1.4.11. Text inputs get the edge from ui.css; the
+   checkbox is drawn here so its edge and its checked state use the same tokens in both themes. */
 .check input[type='checkbox'] {
   appearance: none;
   display: grid;
@@ -45,12 +44,12 @@ fieldset.panel legend + * { clear: both; }
   box-shadow: inset 0 0 0 1px var(--text-muted);
   cursor: pointer;
 }
-.check input[type='checkbox']:checked { background: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.check input[type='checkbox']:checked { background: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
 .check input[type='checkbox']:checked::before {
   content: '';
   width: 12px;
   height: 12px;
-  background: var(--on-accent);
+  background: var(--ground);
   clip-path: polygon(14% 52%, 0 66%, 38% 100%, 100% 22%, 86% 8%, 38% 72%);
 }
 
@@ -59,7 +58,7 @@ fieldset.panel legend + * { clear: both; }
 
 .field label { font-size: var(--fs-small); color: var(--text-muted); }
 .field input[type='text'] { width: 100%; }
-.field input[aria-invalid='true'] { box-shadow: inset 0 0 0 2px var(--err); }
+.field input[aria-invalid='true'] { outline-color: var(--err); box-shadow: inset 0 0 0 2px var(--err); }
 
 /* A warning always carries its words and a leading marker, never colour alone; the tint pair
    holds 4.9:1 or better in both themes (see ui.css). */

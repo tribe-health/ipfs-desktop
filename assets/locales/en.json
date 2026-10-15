@@ -403,7 +403,7 @@
   "agentSearch": {
     "windowTitle": "Search settings",
     "title": "Search your node",
-    "intro": "Search builds an index of the files on this node so you can ask the agent about them. The index is stored in this app's data folder on this computer. It is off until you turn it on.",
+    "intro": "Search builds an index of the files on this node so you can ask the agent about them. The index is stored in this app's data folder on this computer. While Search is on, the document reader listens on a port with no password, so other programs on this computer and web pages that find the port can make it read files they send, fetch public web addresses or clear its model cache; turn Search off to avoid this.",
     "offHint": "Search is off. These settings are saved but not used until you turn it on.",
     "enable": "Turn on Search",
     "sectionBinaries": "Programs you installed",
