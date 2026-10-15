@@ -25,6 +25,7 @@ const FIELD_INPUT = {
 }
 const WARNING_IDS = ['embedderRemote', 'describerRemote', 'videoHosted']
 const PREVIEW_DELAY_MS = 250
+const BADGE_TONE = { on: 'ok', off: 'warn', pending: 'warn', unavailable: 'err' }
 
 function clearInvalid () {
   for (const id of Object.values(FIELD_INPUT)) $(id).removeAttribute('aria-invalid')
@@ -47,7 +48,18 @@ function showWarnings (warnings) {
   }
 }
 
-function say (tone, text) {
+// The notice sits above the notes by default. A refusal that names a field puts it right under
+// that field, so at a narrow width the words and the marked field are on screen together.
+const NOTICE_HOME = $('notes')
+function placeNotice (field) {
+  const input = FIELD_INPUT[field] && $(FIELD_INPUT[field])
+  const holder = input && input.closest('.field')
+  if (holder) holder.after(notice)
+  else NOTICE_HOME.before(notice)
+}
+
+function say (tone, text, field) {
+  placeNotice(field)
   notice.textContent = text
   if (tone) notice.dataset.tone = tone
   else notice.removeAttribute('data-tone')
@@ -64,7 +76,9 @@ function render (view) {
   $('describer-url').value = view.fields.describerUrl
   $('describer-model').value = view.fields.describerModel
   badge.textContent = view.status.message
-  badge.dataset.tone = view.status.state === 'on' ? 'ok' : view.status.state === 'off' ? 'warn' : 'err'
+  // Waiting (pending) and off are not faults: warn tone with their words. Only a reason the
+  // endpoint gave (unavailable) is an error.
+  badge.dataset.tone = BADGE_TONE[view.status.state] || 'err'
   showWarnings(view.warnings)
   $('off-hint').hidden = view.enabled
   const notes = $('notes')
@@ -145,7 +159,7 @@ form.addEventListener('submit', async (event) => {
     if (result.view.bulkPaused) say('ok', S.saved + ' ' + S.bulkPaused)
     return
   }
-  say('err', (result && result.message) || S.errFailed)
+  say('err', (result && result.message) || S.errFailed, result && result.field)
   if (result && typeof result.field === 'string') markInvalid(result.field)
 })
 

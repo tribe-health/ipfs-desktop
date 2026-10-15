@@ -28,6 +28,14 @@ flag on the directory you unpacked it into: `xattr -dr com.apple.quarantine <dir
 not do this for you. The evidence for xberg 1.3.10 on macOS arm64 (checksum, quarantine, flags, cache
 path, offline switch) is in the kubo repo, `openspec/changes/desktop-search-sidecar/evidence/2026-10-15-task-1.1/`.
 
+## Known limit: the document reader's port
+
+While Search is on, the embedded `xberg` listens on a loopback port that has no authentication. Other
+programs on this computer, and web pages that find the port (simple cross-origin POSTs work, and DNS
+rebinding can read the responses), can make it extract files they send, fetch public URLs, or clear its
+model cache. `ipfs mcp` itself reaches it only through an authenticated proxy. The operator accepted
+this until `xberg` gains authentication. To avoid it, turn Search off.
+
 ## Turning it on
 
 Tray, Settings, **Search settings...** opens a native window (not the Web UI): choose both programs,
