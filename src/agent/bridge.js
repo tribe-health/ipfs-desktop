@@ -9,6 +9,25 @@ const { CHANNELS } = require('./consts')
 const { isWebUiUrl } = require('../webui/security')
 
 /**
+ * The one trust check for every IPC channel of the Web UI window: the event comes from the
+ * window's own webContents, from its main frame, and that frame is the Web UI origin. A
+ * sub-frame, even a same-origin one, a navigated-away main frame and any other window are
+ * refused. The agent chat channels and the agent settings channels both answer through it.
+ *
+ * @param {() => import('electron').WebContents | null | undefined} getWebuiContents
+ * @returns {(event: any) => boolean}
+ */
+function createIsTrusted (getWebuiContents) {
+  return function isTrusted (event) {
+    const contents = getWebuiContents()
+    if (!contents || event.sender !== contents) return false
+    // Main frame only: a sub-frame, even a same-origin one, is refused.
+    if (event.senderFrame !== contents.mainFrame) return false
+    return isWebUiUrl(event.senderFrame.url)
+  }
+}
+
+/**
  * @param {object} deps
  * @param {Pick<import('electron').IpcMain, 'handle' | 'removeHandler'>} deps.ipcMain
  * @param {() => import('electron').WebContents | null | undefined} deps.getWebuiContents
@@ -19,14 +38,7 @@ const { isWebUiUrl } = require('../webui/security')
 function registerAgentBridge ({ ipcMain, getWebuiContents, settings, tokenStore }) {
   if (!settings.enabled) return { enabled: false, dispose: () => {} }
 
-  /** @param {any} event */
-  function isTrusted (event) {
-    const contents = getWebuiContents()
-    if (!contents || event.sender !== contents) return false
-    // Main frame only: a sub-frame, even a same-origin one, is refused.
-    if (event.senderFrame !== contents.mainFrame) return false
-    return isWebUiUrl(event.senderFrame.url)
-  }
+  const isTrusted = createIsTrusted(getWebuiContents)
 
   ipcMain.handle(CHANNELS.GET_ENDPOINT, (event) => (isTrusted(event) ? settings.endpoint : null))
   ipcMain.handle(CHANNELS.GET_TOKEN, (event) => (isTrusted(event) ? tokenStore.get() : undefined))
@@ -40,4 +52,4 @@ function registerAgentBridge ({ ipcMain, getWebuiContents, settings, tokenStore 
   }
 }
 
-module.exports = { registerAgentBridge }
+module.exports = { registerAgentBridge, createIsTrusted }

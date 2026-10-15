@@ -1,5 +1,5 @@
 // @ts-check
-const { screen, BrowserWindow, ipcMain, app, session, safeStorage, systemPreferences } = require('electron')
+const { screen, BrowserWindow, ipcMain, app, session, safeStorage, systemPreferences, dialog } = require('electron')
 const { join } = require('path')
 const { URL } = require('url')
 const serve = require('electron-serve')
@@ -24,7 +24,15 @@ const { WEBUI_ORIGIN, installCsp, webPreferences, originFromMultiaddr } = requir
 const { readAgentChatSettings } = require('../agent/settings')
 const { createTokenStore } = require('../agent/token-store')
 const { registerAgentBridge } = require('../agent/bridge')
-const { ARG_AGENT_CHAT } = require('../agent/consts')
+const { ARG_AGENT_CHAT, ARG_AGENT_SETTINGS, KEYS: AGENT_KEYS } = require('../agent/consts')
+const { createMcpSidecarSecrets } = require('../daemon/mcp-sidecar')
+const { getMcpSidecar, sidecarBaseUrl: loopbackBaseUrl } = require('../agent/sidecar-registry')
+const { createSettingsApi } = require('../agent/settings-api')
+const { createSettingsService } = require('../agent/settings-service')
+const { registerAgentSettingsBridge } = require('../agent/settings-bridge')
+const { createSidecarWatcher, createEventPump } = require('../agent/sidecar-watch')
+const { createTouchId } = require('../agent/confirm/touchid')
+const { createNativeHostConfirm } = require('../agent/confirm/native-dialog')
 const { createAgentConfirmation } = require('../agent/confirm')
 const { setConfirmation } = require('../agent/confirm/registry')
 
@@ -33,9 +41,10 @@ serve({ scheme: 'webui', directory: join(__dirname, '../../assets/webui') })
 /**
  *
  * @param {{ enabled: boolean }} agentChat
+ * @param {boolean} agentSettings the agent settings bridge is on
  * @returns {BrowserWindow}
  */
-const createWindow = (agentChat) => {
+const createWindow = (agentChat, agentSettings) => {
   logger.info('[webui] creating window')
   const dimensions = screen.getPrimaryDisplay()
 
@@ -54,7 +63,8 @@ const createWindow = (agentChat) => {
       additionalArguments: [
         `--ipfs-desktop-version=${VERSION}`,
         `--ipfs-desktop-countly-key=${COUNTLY_KEY}`,
-        ...(agentChat.enabled ? [ARG_AGENT_CHAT] : [])
+        ...(agentChat.enabled ? [ARG_AGENT_CHAT] : []),
+        ...(agentSettings ? [ARG_AGENT_SETTINGS] : [])
       ],
       allowNodeIntegration: process.env.NODE_ENV === 'test'
     })
@@ -179,13 +189,6 @@ const createWindow = (agentChat) => {
     logger.info('[web ui] window hidden')
   })
 
-  app.on('before-quit', () => {
-    logger.info('[web ui] app-quit requested')
-    // Makes sure the app quits even though we prevent
-    // the closing of this window.
-    window.removeAllListeners('close')
-  })
-
   return window
 }
 
@@ -219,15 +222,32 @@ module.exports = async function () {
   // once per launch. Off means no flag on the window, no IPC handler, no mcp origin in
   // the CSP.
   const agentChat = readAgentChatSettings(store)
-  const window = createWindow(agentChat)
+  // The agent settings bridge: on unless the store says false. Read once per launch like
+  // the chat flag; off means no flag on the window, no IPC handler, no event stream.
+  const agentSettingsOn = store.get(AGENT_KEYS.SETTINGS_ENABLED, true) !== false
+  // `let`: the window is recreated when the sidecar's port changes (recreateWindow below),
+  // and every closure here must follow the current one.
+  let window = createWindow(agentChat, agentSettingsOn)
   ctx.setProp('webui', window)
+  // One listener for the life of the app, acting on whichever window is current, so a
+  // recreated window adds nothing. Makes sure the app quits even though closing the
+  // window is prevented.
+  app.on('before-quit', () => {
+    logger.info('[web ui] app-quit requested')
+    if (!window.isDestroyed()) window.removeAllListeners('close')
+  })
   let apiAddress = null
   let gatewayAddress = null
+
+  // The sidecar's loopback origin for the CSP: only while the bridge is on and the
+  // supervisor reports 'running' (the child printed its bound address), and only the port the child itself reported.
+  const sidecarBaseUrl = () => loopbackBaseUrl(getMcpSidecar(), agentSettingsOn)
 
   installCsp(session.defaultSession, () => ({
     apiOrigin: originFromMultiaddr(apiAddress),
     gatewayOrigin: originFromMultiaddr(gatewayAddress),
-    mcpOrigin: agentChat.origin
+    mcpOrigin: agentChat.origin,
+    sidecarOrigin: sidecarBaseUrl()
   }))
   const agentBridge = registerAgentBridge({
     ipcMain,
@@ -249,6 +269,61 @@ module.exports = async function () {
   setConfirmation(agentConfirm)
   agentConfirm.onChange(() => ipcMain.emit(ipcMainEvents.CONFIG_UPDATED))
   app.on('before-quit', () => agentConfirm.dispose())
+
+  // Agent settings: `ipfsDesktop.agentSettings.*`, answered for the trusted main frame only,
+  // setters in this process. The model key lives in safeStorage; Touch ID guards a backend
+  // or egress change.
+  const sidecarSecrets = createMcpSidecarSecrets({ safeStorage, store, logger })
+  const settingsApi = createSettingsApi({
+    getBaseUrl: sidecarBaseUrl,
+    getAdminToken: () => {
+      try { return sidecarSecrets.ensureAdminToken().value } catch (_) { return undefined }
+    }
+  })
+  const settingsService = createSettingsService({
+    api: settingsApi,
+    getSidecar: getMcpSidecar,
+    secrets: sidecarSecrets,
+    // The same Touch ID helper the confirmation window uses.
+    authenticate: createTouchId(systemPreferences),
+    // Without Touch ID: a native dialog parented to the Web UI window, naming the host.
+    confirmNative: createNativeHostConfirm({
+      dialog,
+      getWindow: () => window,
+      t: (key, options) => i18n.t(key, options)
+    }),
+    t: (key, options) => i18n.t(key, options),
+    logger
+  })
+  const settingsBridge = registerAgentSettingsBridge({
+    ipcMain,
+    getWebuiContents: () => (window.isDestroyed() ? null : window.webContents),
+    enabled: agentSettingsOn,
+    service: settingsService,
+    logger
+  })
+  const eventPump = createEventPump({ api: settingsApi, onRevision: (revision) => settingsBridge.pushChange(revision) })
+  const sidecarWatcher = createSidecarWatcher({
+    getSidecar: getMcpSidecar,
+    onState: (snapshot) => {
+      if (agentSettingsOn) {
+        if (snapshot.state === 'running') eventPump.start()
+        else eventPump.stop()
+      }
+      // The tray's status line follows the supervisor.
+      ipcMain.emit(ipcMainEvents.CONFIG_UPDATED)
+    },
+    onPortChange: (port, previous) => {
+      if (!agentSettingsOn) return
+      logger.info(`[web ui] the agent sidecar moved from port ${previous} to ${port}; recreating the window`)
+      recreateWindow()
+    }
+  })
+  app.on('before-quit', () => {
+    sidecarWatcher.stop()
+    eventPump.stop()
+    settingsBridge.dispose()
+  })
 
   const url = new URL('/', WEBUI_ORIGIN)
   url.hash = '/blank'
@@ -280,6 +355,26 @@ module.exports = async function () {
     lastLoadedUrl = nextUrl
     window.loadURL(nextUrl)
   }
+
+  // The window is built for one sidecar port (the CSP origin and what the page learned from
+  // status()), so a new port gets a new window, on the same route and as visible as before.
+  const recreateWindow = () => {
+    const old = window
+    if (old.isDestroyed()) return
+    const wasVisible = old.isVisible()
+    const currentUrl = getCurrentWebUiUrl()
+    if (currentUrl) url.hash = new URL(currentUrl).hash
+    window = createWindow(agentChat, agentSettingsOn)
+    // Everything that reads the window through the context follows the current one.
+    ctx.replaceProp('webui', window)
+    lastLoadedUrl = null
+    if (wasVisible) window.once('ready-to-show', () => { window.show() })
+    old.removeAllListeners('close')
+    old.destroy()
+    loadIfChanged(url.toString())
+  }
+
+  sidecarWatcher.start()
 
   ctx.setProp('launchWebUI', async (path, { focus = true, forceRefresh = false } = {}) => {
     if (window.isDestroyed()) {

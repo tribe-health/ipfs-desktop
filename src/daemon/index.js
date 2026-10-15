@@ -7,6 +7,7 @@ const logger = require('../common/logger')
 const { STATUS } = require('./consts')
 const createDaemon = require('./daemon')
 const { createMcpSidecar, MCP_SIDECAR_ENABLED_KEY } = require('./mcp-sidecar')
+const { setMcpSidecar } = require('../agent/sidecar-registry')
 const ipcMainEvents = require('../common/ipc-main-events')
 const { analyticsKeys } = require('../analytics/keys')
 const getCtx = require('../context')
@@ -20,6 +21,8 @@ async function setupDaemon () {
   const getMcpSidecar = () => {
     if (!mcpSidecar) {
       mcpSidecar = createMcpSidecar()
+      // The Web UI bridge and the tray read the supervisor through this registry.
+      setMcpSidecar(mcpSidecar)
       // The tray toggle writes the store key; apply it without a restart.
       if (typeof store.onDidChange === 'function') {
         store.onDidChange(MCP_SIDECAR_ENABLED_KEY, (value) => {

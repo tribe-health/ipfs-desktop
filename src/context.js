@@ -68,6 +68,22 @@ class Context {
   }
 
   /**
+   * Replace the value of a property that was set before (the Web UI window, when it is
+   * recreated). Later getProp calls see the new value; a promise already handed out keeps
+   * the value it resolved with.
+   *
+   * @template T
+   * @param {ContextProperties} propertyName
+   * @param {T} value
+   * @returns {void}
+   */
+  replaceProp (propertyName, value) {
+    if (!this._properties.has(propertyName)) return this.setProp(propertyName, value)
+    logger.info(`[ctx] replacing ${String(propertyName)}`)
+    this._properties.set(propertyName, value)
+  }
+
+  /**
    * Get the value of a property wrapped in a promise.
    * @template T
    * @param {ContextProperties} propertyName

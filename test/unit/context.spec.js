@@ -94,4 +94,12 @@ test.describe('App Context', () => {
     await testGetAndSet(ctx, 'num', 4)
     expect(() => ctx.setProp('num', 5)).toThrowError('[ctx] Property num already exists')
   })
+
+  test('replaceProp swaps a set value; later getProp sees the new one', async () => {
+    await testGetAndSet(ctx, 'win', 1)
+    ctx.replaceProp('win', 2)
+    expect(await ctx.getProp('win')).toEqual(2)
+    ctx.replaceProp('fresh', 3)
+    expect(await ctx.getProp('fresh')).toEqual(3)
+  })
 })
