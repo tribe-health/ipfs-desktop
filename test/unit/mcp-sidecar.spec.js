@@ -1036,6 +1036,20 @@ test.describe('starting state, per-spawn admin token and restart', () => {
     await sidecar.stop()
   })
 
+  test('N2: a stop() or killNow() that runs while the old child halts wins over the restart', async () => {
+    for (const interrupt of [(sc) => sc.stop(), (sc) => { sc.killNow() }]) {
+      const { sidecar, spawns } = setup()
+      await sidecar.start('/repo')
+      spawns[0].child.stderr.emit('data', BOUND(5050))
+      const restarting = sidecar.restart()
+      // The old child is still being stopped (its exit arrives on a timer); the daemon stops now.
+      const interrupted = interrupt(sidecar)
+      await Promise.all([restarting, interrupted])
+      expect(spawns.length).toEqual(1)
+      expect(sidecar.getState()).toEqual('stopped')
+    }
+  })
+
   test('restart does nothing before a daemon gave a repo, and keeps an operator off switch off', async () => {
     const idle = setup()
     await idle.sidecar.restart()

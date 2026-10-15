@@ -9,6 +9,7 @@ const logger = require('../common/logger')
 const store = require('../common/store')
 const { getCustomBinary } = require('../custom-ipfs-binary')
 const { createSecretStore } = require('../agent/secret-store')
+const { readSearchSettings, buildSearchConfig } = require('./mcp-sidecar-search')
 
 const DEFAULT_PORT = 5050
 const BACKOFF_INITIAL_MS = 1000
@@ -133,9 +134,13 @@ function createMcpSidecarSecrets ({ safeStorage, store, logger, platform }) {
  * principal (write groups per docs/mcp/chat-setup.md; writes still need a
  * confirmation). desktop-admin is scoped to the settings route. The allowlist
  * lets the Web UI window (webui://localhost) call /agui on the loopback
- * listener.
+ * listener. With Search on and valid (mcp-sidecar-search.js) the config also carries the
+ * `embeddings` block, and desktop-ui's egress_ack names each confirmed non-loopback host;
+ * otherwise neither is present.
+ *
+ * @param {{ ok: true, embeddings: object, egressAck: string[] } | null} [search]
  */
-function sidecarConfig () {
+function sidecarConfig (search = null) {
   return {
     principals: [
       {
@@ -143,7 +148,7 @@ function sidecarConfig () {
         kind: 'ui',
         credential: { env: SIDECAR_ENV.UI_TOKEN },
         write_groups: ['pin', 'content'],
-        egress_ack: ['local']
+        egress_ack: search ? search.egressAck : ['local']
       },
       {
         name: 'desktop-admin',
@@ -151,7 +156,8 @@ function sidecarConfig () {
         credential: { env: SIDECAR_ENV.ADMIN_TOKEN }
       }
     ],
-    agent: { origin_allowlist: ['webui://localhost'] }
+    agent: { origin_allowlist: ['webui://localhost'] },
+    ...(search ? { embeddings: search.embeddings } : {})
   }
 }
 
@@ -159,8 +165,11 @@ function sidecarConfig () {
 // Desktop's environment (cloud credentials, tokens, launcher state) is dropped.
 // `ipfs mcp` needs a working PATH/HOME/TMPDIR, the locale, the Windows
 // profile variables, the D-Bus session for the Linux polkit prompt, and the
-// standard proxy and CA variables Go's net/http reads for the operator's LLM
-// endpoint. The SIDECAR_ENV names are never inherited: they come from the
+// standard CA variables Go's net/http reads for the operator's LLM endpoint. The proxy
+// variables are passed through but `ipfs mcp` ignores them for the model, embedder,
+// extractor and describer calls (they go direct, so content never takes a proxy the
+// operator did not name); only its remote `--api` RPC client honours them, which a managed
+// sidecar does not use. The SIDECAR_ENV names are never inherited: they come from the
 // secret store only.
 const ENV_ALLOW = new Set([
   'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TZ',
@@ -269,6 +278,8 @@ async function discoverPort (preferred) {
  * @property {{ get: (key: string, fallback?: any) => any, set: (key: string, value: any) => void, delete: (key: string) => void }} [store]
  * @property {{ mkdirSync: typeof fs.mkdirSync, writeFileSync: typeof fs.writeFileSync }} [fsImpl]
  * @property {ReturnType<typeof createMcpSidecarSecrets>} [secrets]
+ * @property {import('./mcp-sidecar-search').SearchFs} [searchFs] stat, access and mkdir for the Search binaries and directories (tests)
+ * @property {string} [searchDir] where Search keeps its store and xberg cache, default <settingsDir>/search
  * @property {number} [backoffInitialMs]
  * @property {number} [backoffMaxMs]
  * @property {number} [backoffResetMs]
@@ -288,6 +299,7 @@ async function discoverPort (preferred) {
  * @property {() => 'stopped'|'starting'|'running'|'restarting'|'failing'} getState 'starting' is a spawned child that has not reported its bound address
  * @property {() => number} getPort the port the child reported binding, else the one it was told to bind
  * @property {() => number|undefined} childPid
+ * @property {() => { state: 'off'|'on'|'unavailable', reason?: string, detail?: string }} getSearchState what the last start did with Search: off (the default), on (the embeddings block was written) or unavailable (on, but a path, binary or host was not usable; no block was written)
  */
 
 /**
@@ -326,6 +338,7 @@ function createMcpSidecar (options = {}) {
     logger: log
   })
   const configPath = join(settingsDir, SIDECAR_CONFIG_NAME)
+  const searchDir = options.searchDir || join(settingsDir, 'search')
 
   /** @type {import('child_process').ChildProcess|null} */
   let child = null
@@ -344,6 +357,8 @@ function createMcpSidecar (options = {}) {
   let hasLlmKey = false
   /** @type {NodeJS.Timeout|null} */
   let restartTimer = null
+  /** @type {{ state: 'off'|'on'|'unavailable', reason?: string, detail?: string }} */
+  let searchState = { state: 'off' }
 
   const args = () => {
     const argv = [
@@ -384,7 +399,35 @@ function createMcpSidecar (options = {}) {
       log.info(`[mcp-sidecar] passing the LLM API key to the child as $${SIDECAR_ENV.LLM_API_KEY}`)
     }
     fsImpl.mkdirSync(settingsDir, { recursive: true, mode: 0o700 })
-    fsImpl.writeFileSync(configPath, JSON.stringify(sidecarConfig(), null, 2) + '\n', { mode: 0o600 })
+    const search = resolveSearch()
+    fsImpl.writeFileSync(configPath, JSON.stringify(sidecarConfig(search), null, 2) + '\n', { mode: 0o600 })
+  }
+
+  /**
+   * Search is off unless the person turned it on; when it is on but cannot be used the
+   * reason is logged and kept (getSearchState), and no embeddings block is written.
+   *
+   * @returns {{ ok: true, embeddings: object, egressAck: string[] } | null}
+   */
+  function resolveSearch () {
+    let result
+    try {
+      result = buildSearchConfig({ settings: readSearchSettings(settingsStore), searchDir, fs: options.searchFs })
+    } catch (err) {
+      result = { ok: false, reason: 'dir_failed', detail: String(err) }
+    }
+    if (result.ok) {
+      searchState = { state: 'on' }
+      log.info('[mcp-sidecar] Search is on: writing the embeddings block (embedded store and extractor from operator-installed binaries)')
+      return result
+    }
+    if (result.reason === 'off') {
+      searchState = { state: 'off' }
+      return null
+    }
+    searchState = { state: 'unavailable', reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) }
+    log.warn(`[mcp-sidecar] Search is on but not usable (${result.reason}${result.detail ? `: ${result.detail}` : ''}); no embeddings block is written`)
+    return null
   }
 
   const isEnabled = () => settingsStore.get(MCP_SIDECAR_ENABLED_KEY, true) !== false
@@ -659,14 +702,20 @@ function createMcpSidecar (options = {}) {
     /**
      * Stop and start the child again without touching the persisted off switch (a new
      * key is applied this way). A no-op while no daemon gave a repo path. The start
-     * still honours the off switch: a sidecar the operator turned off stays off.
+     * still honours the off switch: a sidecar the operator turned off stays off. A
+     * stop() or quit (killNow) that runs while the old child is being halted wins: the
+     * epoch moves or the repo path is forgotten, and no new child is spawned.
      *
      * @returns {Promise<void>}
      */
     async restart () {
       const path = repoPath
       if (path === null) return
-      await halt()
+      const halting = halt()
+      // halt() bumps the epoch before its first await, so this is the epoch of this halt.
+      const mine = epoch
+      await halting
+      if (repoPath !== path || epoch !== mine) return
       await this.start(path)
     },
 
@@ -698,6 +747,7 @@ function createMcpSidecar (options = {}) {
       if (child) return boundChild === child ? 'running' : 'starting'
       return active ? 'restarting' : 'stopped'
     },
+    getSearchState: () => searchState,
     getPort: () => port,
     childPid: () => (child ? child.pid : undefined)
   }

@@ -374,14 +374,18 @@
     }
   },
   "agentSettings": {
-    "touchReasonHost": "Send node content to {{host}}",
-    "touchReasonBackend": "Change the agent backend",
+    "touchReasonHost": "Send node content to {{host}} (your stored model key does not follow)",
+    "touchReasonBackend": "Change the agent backend (your stored model key does not follow to a new host)",
+    "touchReasonHostKeyFollows": "Send node content and the model key your server manages to {{host}}",
+    "touchReasonBackendKeyFollows": "Change the agent backend (the model key your server manages will be sent to the new host)",
     "errNotRunning": "The local agent endpoint is not running. Turn it on in the tray menu and try again.",
     "errToken": "The agent endpoint did not accept this app's credentials. Restart IPFS Desktop and try again.",
     "errRouteAbsent": "The agent endpoint has no settings service. Nothing was changed.",
     "errRejected": "The agent endpoint refused the change (HTTP {{status}}): {{detail}}",
     "errStale": "The settings changed since you loaded them. Reload and try again.",
     "errTouchId": "Touch ID was not completed. Nothing was changed.",
+    "errDeclinedHost": "You declined this host. Close and reopen this window to be asked again.",
+    "errConfirmPending": "Another confirmation is already open on this computer. Answer it first.",
     "errKeystore": "Secure storage is unavailable on this computer, so the key was not stored.",
     "errKeyShape": "That key has characters this app cannot store. Nothing was changed.",
     "errRestart": "The agent endpoint did not come back after the change. Check the logs.",
@@ -390,10 +394,90 @@
       "title": "Confirm on this computer",
       "messageHost": "Allow the agent to use {{host}}?",
       "messageBackend": "Allow this change to the agent backend?",
-      "detail": "This computer has no Touch ID. Your node content or your model API key may be sent to this host. Only continue if you started this change yourself.",
+      "detail": "This computer has no Touch ID. Your node content may be sent to this host. A stored model key is not sent to a new host; supply a new key if it needs one. Only continue if you started this change yourself.",
+      "detailKeyFollows": "This computer has no Touch ID. Your node content may be sent to this host, and so will the model key your server manages, because that key follows a backend change. Only continue if you started this change yourself.",
       "confirm": "Allow",
       "cancel": "Cancel"
+    }
+  },
+  "agentSearch": {
+    "windowTitle": "Search settings",
+    "title": "Search your node",
+    "intro": "Search builds an index of the files on this node so you can ask the agent about them. The index is stored in this app's data folder on this computer. It is off until you turn it on.",
+    "offHint": "Search is off. These settings are saved but not used until you turn it on.",
+    "enable": "Turn on Search",
+    "sectionBinaries": "Programs you installed",
+    "surrealLabel": "SurrealDB program (surreal)",
+    "xbergLabel": "Document reader (xberg)",
+    "pathPlaceholder": "/full/path/to/the/program",
+    "browse": "Choose...",
+    "sectionEmbedder": "Embedder",
+    "embedderUrlLabel": "Embedder address",
+    "embedderUrlPlaceholder": "http://127.0.0.1:11434/v1",
+    "embedderModelLabel": "Embedder model",
+    "embedderDimensionsLabel": "Vector size (dimensions)",
+    "sectionDescriber": "Image descriptions (optional)",
+    "describerHint": "A vision model that writes a short description of each image, so images can be found by what they show. Leave both fields empty for none.",
+    "describerUrlLabel": "Vision model address",
+    "describerModelLabel": "Vision model",
+    "save": "Save and restart the agent endpoint",
+    "close": "Close",
+    "saved": "Saved. The agent endpoint restarted to apply it.",
+    "savedNoRestart": "Saved. It applies when the agent endpoint next starts.",
+    "bulkPaused": "A bulk indexing run was in progress. It is paused; resume it from the agent chat.",
+    "status": {
+      "off": "Search is off.",
+      "on": "Search is on.",
+      "pending": "Search is on and will start with the agent endpoint."
     },
-    "touchReasonKeyHost": "Test the connection to {{host}}"
+    "reason": {
+      "off": "Search is off.",
+      "incomplete": "Search is on but not set up: choose both programs and fill in the embedder address, model and vector size.",
+      "binary_not_absolute": "The {{detail}} program needs a full path that starts at the top of the disk.",
+      "binary_missing": "The {{detail}} program was not found at the path you gave.",
+      "binary_not_executable": "The {{detail}} program is there but is not allowed to run. Allow it to run (for example chmod +x) and, if macOS blocked it, clear its quarantine flag.",
+      "binary_unsafe": "The {{detail}} program, or the folder it is in, is not yours (or root's) or can be changed by other users. Move it to a folder only you can write to, or remove the group and other write permission (for example chmod go-w).",
+      "embedder_invalid": "The embedder address must be https, or http on this computer, with no user name or password.",
+      "describer_invalid": "The vision model address or name is not valid.",
+      "host_not_confirmed": "{{detail}} has not been confirmed on this computer, so nothing is sent to it. Save again to be asked.",
+      "dir_unsafe": "The folder {{detail}} is not private to you (it must be yours and not writable by others).",
+      "dir_failed": "The folder {{detail}} could not be prepared."
+    },
+    "warn": {
+      "embedderRemote": "The text of your files is sent to {{host}}.",
+      "describerRemote": "File bytes are sent to {{host}}.",
+      "videoHosted": "Video description is off. It needs a hosted model; this app does not turn it on."
+    },
+    "note": {
+      "resources": "Indexing uses your CPU and disk while it runs. It never starts by itself: you start a run from the agent chat, and it stops at the limits set for it.",
+      "binaries": "This app does not download or install anything. Point it at programs you installed yourself. If macOS blocked one after a download, clear its quarantine flag.",
+      "offline": "The document reader runs offline here, so scanned pages and images are not read by text recognition. Plain text, Office files and text PDFs are."
+    },
+    "dialog": {
+      "title": "Confirm Search on this computer",
+      "messageText": "Send the text of your files to {{host}}?",
+      "messageImages": "Send your image files to {{host}}?",
+      "detailText": "This computer has no Touch ID. Search reads the files on this node and sends their text to {{host}} to build the index. Only continue if you started this change yourself.",
+      "detailImages": "This computer has no Touch ID. Search sends the image files on this node to {{host}} so a model can describe them. Only continue if you started this change yourself."
+    },
+    "touchReasonEmbedder": "Send the text of your files to {{host}}",
+    "touchReasonDescriber": "Send your image files to {{host}}",
+    "errUnknownField": "The Search settings include a field this app does not know.",
+    "errInvalid": "The Search settings are not valid.",
+    "errPath": "A program path must start at the top of the disk, for example /usr/local/bin/surreal.",
+    "errUrl": "An address must be https, or http on this computer, with no user name or password.",
+    "errModel": "A model name is too long.",
+    "errDimensions": "The vector size must be a whole number from 1 to 8192.",
+    "errDescriber": "Fill in both the vision model address and its name, or leave both empty.",
+    "errIncomplete": "To turn Search on, choose both programs and fill in the embedder address, model and vector size.",
+    "errNotConfirmed": "Not confirmed for {{host}}. Nothing was changed.",
+    "errFailed": "The Search settings could not be saved."
+  },
+  "agentSearchTray": {
+    "open": "Search settings...",
+    "statusOff": "Search: off",
+    "statusOn": "Search: on",
+    "statusPending": "Search: waiting for the agent endpoint",
+    "statusUnavailable": "Search: needs attention"
   }
 }

@@ -11,15 +11,18 @@ const messages = {
   'agentSettings.errRouteAbsent': 'route absent',
   'agentSettings.errStale': 'stale revision',
   'agentSettings.errTouchId': 'Touch ID was not completed',
+  'agentSettings.errDeclinedHost': 'host declined for this window',
+  'agentSettings.errConfirmPending': 'a confirmation is already open',
   'agentSettings.errKeystore': 'keystore unavailable',
   'agentSettings.errKeyShape': 'key shape',
   'agentSettings.errRestart': 'did not come back',
   'agentSettings.errUnexpected': 'unexpected'
 }
 const t = (key, options) => {
-  if (key === 'agentSettings.touchReasonHost') return `Send node content to ${options.host}`
-  if (key === 'agentSettings.touchReasonKeyHost') return `Test the connection to ${options.host}`
-  if (key === 'agentSettings.touchReasonBackend') return 'Change the agent backend'
+  if (key === 'agentSettings.touchReasonHost') return `Send node content to ${options.host} (your stored model key does not follow)`
+  if (key === 'agentSettings.touchReasonHostKeyFollows') return `Send node content and the model key your server manages to ${options.host}`
+  if (key === 'agentSettings.touchReasonBackendKeyFollows') return 'Change the agent backend (the model key your server manages will be sent to the new host)'
+  if (key === 'agentSettings.touchReasonBackend') return 'Change the agent backend (your stored model key does not follow to a new host)'
   if (key === 'agentSettings.errRejected') return `rejected ${options.status}: ${options.detail}`
   return messages[key] ?? key
 }
@@ -199,7 +202,7 @@ test.describe('agent settings service: set and Touch ID (1.4)', () => {
       backend: { base_url: 'https://other.example/v1' },
       egress_confirmation: { host: 'other.example' }
     })
-    expect(prompts).toEqual(['Send node content to other.example'])
+    expect(prompts).toEqual(['Send node content to other.example (your stored model key does not follow)'])
     expect(server.calls.map(c => c[0])).toEqual(['get', 'put'])
     expect(server.calls[1][2]).toEqual({ backend: { base_url: 'https://other.example/v1' }, egress_confirmation: { host: 'other.example' } })
   })
@@ -208,7 +211,7 @@ test.describe('agent settings service: set and Touch ID (1.4)', () => {
     const { service, prompts } = setup({ server: configured() })
     await service.set({ revision: 'r1', backend: { model: 'm-two' } })
     // The prompt names the host the model runs on.
-    expect(prompts).toEqual(['Send node content to llm.example'])
+    expect(prompts).toEqual(['Send node content to llm.example (your stored model key does not follow)'])
   })
 
   test('the first backend (none configured) asks', async () => {
@@ -249,7 +252,8 @@ test.describe('agent settings service: set and Touch ID (1.4)', () => {
     const { service, prompts, dialogs, logs, server } = setup({ server: configured(), touch: { available: false, accept: false } })
     await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
     expect(prompts).toEqual([])
-    expect(dialogs).toEqual([{ host: 'other.example' }])
+    expect(dialogs).toHaveLength(1)
+    expect(dialogs[0]).toMatchObject({ host: 'other.example', purpose: 'backend', keyFollows: false })
     expect(server.calls.some(c => c[0] === 'put')).toBe(true)
     expect(logs.warn.some(m => m.includes('Touch ID is unavailable'))).toBe(true)
   })
@@ -265,6 +269,51 @@ test.describe('agent settings service: set and Touch ID (1.4)', () => {
     const { service, server } = setup({ server: configured(), touch: { available: false, accept: false }, native: null })
     await expect(service.set({ revision: 'r1', egress_confirmation: { host: 'llm.example' } })).rejects.toThrow('Touch ID was not completed')
     expect(server.calls.some(c => c[0] === 'put')).toBe(false)
+  })
+
+  test('N1: a host the person declined is refused without a second prompt until the window is reset', async () => {
+    const { service, prompts, server } = setup({ server: configured(), touch: { available: true, accept: false } })
+    await expect(service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })).rejects.toThrow('Touch ID was not completed')
+    expect(prompts.length).toEqual(1)
+    for (let i = 0; i < 3; i++) {
+      await expect(service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })).rejects.toThrow('host declined for this window')
+    }
+    expect(prompts.length).toEqual(1)
+    // Another host is still asked.
+    await expect(service.set({ revision: 'r1', backend: { base_url: 'https://third.example/v1' } })).rejects.toThrow('Touch ID was not completed')
+    expect(prompts.length).toEqual(2)
+    expect(server.calls.some(c => c[0] === 'put')).toBe(false)
+    // Closing or recreating the window forgets the refusal.
+    service.forgetDeclined()
+    await expect(service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })).rejects.toThrow('Touch ID was not completed')
+    expect(prompts.length).toEqual(3)
+  })
+
+  test('N1: the same applies to the native dialog', async () => {
+    const { service, dialogs } = setup({ server: configured(), touch: { available: false, accept: false }, native: { accept: false } })
+    await expect(service.set({ revision: 'r1', backend: { model: 'm-two' } })).rejects.toThrow('Touch ID was not completed')
+    await expect(service.set({ revision: 'r1', backend: { model: 'm-two' } })).rejects.toThrow('host declined for this window')
+    expect(dialogs.length).toEqual(1)
+  })
+
+  test('N1: only one confirmation is open at a time', async () => {
+    const server = configured()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    // A prompt that stays open until released.
+    const slow = createSettingsService({
+      api: server.api,
+      getSidecar: () => ({ getState: () => 'running', getPort: () => 5050, restart: async () => {} }),
+      secrets: { hasLlmKey: () => false, getLlmKey: () => undefined, setLlmKey () {}, clearLlmKey () {} },
+      authenticate: { available: () => true, prompt: async () => { await gate; return true } },
+      t,
+      sleep: async () => {}
+    })
+    const first = slow.set({ revision: 'r1', backend: { model: 'm-two' } })
+    await new Promise((resolve) => setImmediate(resolve))
+    await expect(slow.set({ revision: 'r1', backend: { model: 'm-three' } })).rejects.toThrow('a confirmation is already open')
+    release()
+    await first
   })
 
   test('the server contract errors pass through with their code', async () => {
@@ -394,6 +443,193 @@ test.describe('agent settings service: key is write-only (1.2)', () => {
   })
 })
 
+test.describe('agent settings service: the key does not follow a host move (ADR-0012, 1.7)', () => {
+  const withKey = () => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'environment' }
+    return setup({ server, storedKey: KEY })
+  }
+
+  test('a move without a new key deletes the Desktop key, restarts without it, then writes, and reports key_not_carried', async () => {
+    const { service, server, keyBox, sidecarCalls } = withKey()
+    const res = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' }, egress_confirmation: { host: 'other.example' } })
+    expect(keyBox.value).toBeUndefined()
+    expect(sidecarCalls).toEqual(['restart'])
+    // The write happens after the restart, on the revision the restarted sidecar holds.
+    expect(server.calls.map(c => c[0])).toEqual(['get', 'get', 'put'])
+    expect(server.calls[2][1]).toEqual('r2')
+    expect(res.key_not_carried).toEqual({ reason: 'host_changed', cleared: true })
+    expect(res.backend.api_key).toEqual({ set: false })
+    expect(JSON.stringify(res)).not.toContain(KEY)
+  })
+
+  test('a port or scheme change is a move; a path or model change is not', async () => {
+    for (const baseUrl of ['https://llm.example:8443/v1', 'http://llm.example/v1']) {
+      const moved = withKey()
+      const res = await moved.service.set({ revision: 'r1', backend: { base_url: baseUrl } })
+      expect(moved.keyBox.value).toBeUndefined()
+      expect(res.key_not_carried).toEqual({ reason: 'host_changed', cleared: true })
+    }
+    for (const backend of [{ base_url: 'https://llm.example/other/path' }, { model: 'm-two' }]) {
+      const stayed = withKey()
+      const res = await stayed.service.set({ revision: 'r1', backend })
+      expect(stayed.keyBox.value).toEqual(KEY)
+      expect(stayed.sidecarCalls).toEqual([])
+      expect(res.key_not_carried).toBeUndefined()
+    }
+  })
+
+  test('the first backend is not a move: a staged key waits and is applied', async () => {
+    const { service, keyBox, sidecarCalls } = setup({ storedKey: KEY })
+    const res = await service.set({ revision: 'r1', backend: { kind: 'openai', base_url: 'https://llm.example/v1', model: 'm' } })
+    expect(keyBox.value).toEqual(KEY)
+    expect(sidecarCalls).toEqual(['restart'])
+    expect(res.key_not_carried).toBeUndefined()
+  })
+
+  test('a declined confirmation deletes nothing', async () => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'environment' }
+    const { service, keyBox, sidecarCalls } = setup({ server, storedKey: KEY, touch: { available: true, accept: false } })
+    await expect(service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })).rejects.toBeInstanceOf(BridgeFailure)
+    expect(keyBox.value).toEqual(KEY)
+    expect(sidecarCalls).toEqual([])
+  })
+
+  test('with no Desktop key a move restarts nothing and a reference key stays the server\'s business', async () => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'file' }
+    const { service, sidecarCalls } = setup({ server })
+    const res = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+    expect(sidecarCalls).toEqual([])
+    expect(res.key_not_carried).toBeUndefined()
+  })
+
+  test('the server key_not_carried passes through with only reason and cleared', async () => {
+    const server = configured()
+    const put = server.api.put
+    server.api.put = async (...args) => ({ ...(await put(...args)), key_not_carried: { reason: 'host_changed', cleared: false, secret: KEY } })
+    const { service } = setup({ server })
+    const res = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+    expect(res.key_not_carried).toEqual({ reason: 'host_changed', cleared: false })
+    expect(JSON.stringify(res)).not.toContain(KEY)
+  })
+
+  test('a malformed key_not_carried is dropped', async () => {
+    for (const bad of [{ reason: 1, cleared: true }, { reason: 'host_changed', cleared: 'yes' }, 'host_changed', null]) {
+      const server = configured()
+      const put = server.api.put
+      server.api.put = async (...args) => ({ ...(await put(...args)), key_not_carried: bad })
+      const { service } = setup({ server })
+      expect((await service.set({ revision: 'r1', backend: { model: 'm-two' } })).key_not_carried).toBeUndefined()
+    }
+  })
+
+  test('M2: a refused move (409) puts the key back and restarts, and the old backend is keyed again', async () => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'environment' }
+    const refused = new SettingsApiError(409, { error: { code: 'egress_confirmation_required', message: 'confirm the host' } }, 'confirm')
+    server.api.put = async (revision, write) => { server.calls.push(['put', revision, write]); throw refused }
+    const { service, keyBox, sidecarCalls, logs } = setup({ server, storedKey: KEY })
+    const err = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } }).catch((e) => e)
+    expect(err).toBeInstanceOf(ContractError)
+    expect(err.shape.error.code).toEqual('egress_confirmation_required')
+    // Cleared and restarted before the write, restored and restarted after it was refused.
+    expect(sidecarCalls).toEqual(['restart', 'restart'])
+    expect(keyBox.value).toEqual(KEY)
+    expect(server.state.backend.base_url).toEqual('https://llm.example/v1')
+    expect(server.state.backend.api_key).toEqual({ set: true, source: 'environment' })
+    expect(logs.warn.join(' ')).toContain('restored')
+    expect(logs.warn.join(' ')).not.toContain(KEY)
+    // The page reads the old backend as keyed, from the Desktop key.
+    const read = await service.get()
+    expect(read.backend.api_key).toEqual({ set: true, source: 'settings_api' })
+  })
+
+  test('M2: any refusal restores it: a bad request, a stale revision, a sidecar that answers 500', async () => {
+    for (const status of [400, 412, 500]) {
+      const server = configured()
+      server.state.backend.api_key = { set: true, source: 'environment' }
+      server.api.put = async () => { throw new SettingsApiError(status, null, 'refused') }
+      const { service, keyBox, sidecarCalls } = setup({ server, storedKey: KEY })
+      await expect(service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })).rejects.toBeInstanceOf(BridgeFailure)
+      expect(keyBox.value, String(status)).toEqual(KEY)
+      expect(sidecarCalls, String(status)).toEqual(['restart', 'restart'])
+    }
+  })
+
+  test('M2: a failed restart before the write also restores the key, and the original error is what is thrown', async () => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'environment' }
+    const { service, keyBox } = setup({ server, storedKey: KEY, afterRestartState: 'failing' })
+    const err = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } }).catch((e) => e)
+    expect(err).toBeInstanceOf(BridgeFailure)
+    expect(err.message).toEqual('did not come back')
+    expect(keyBox.value).toEqual(KEY)
+  })
+
+  test('M2: an accepted move still leaves the key deleted, and nothing is restored', async () => {
+    const { service, keyBox, sidecarCalls } = withKey()
+    await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' }, egress_confirmation: { host: 'other.example' } })
+    expect(keyBox.value).toBeUndefined()
+    expect(sidecarCalls).toEqual(['restart'])
+  })
+
+  test('a key the server supplies by reference follows a move: the prompt and the native dialog say it will be sent', async () => {
+    for (const source of ['file', 'environment', 'flag']) {
+      const server = configured()
+      server.state.backend.api_key = { set: true, source }
+      const { service, prompts, sidecarCalls } = setup({ server })
+      const res = await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+      expect(prompts, source).toEqual(['Send node content and the model key your server manages to other.example'])
+      expect(prompts[0]).not.toContain('does not follow')
+      expect(sidecarCalls).toEqual([])
+      expect(res.key_not_carried).toBeUndefined()
+    }
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'file' }
+    const { service, dialogs } = setup({ server, touch: { available: false } })
+    await service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+    expect(dialogs[0]).toMatchObject({ host: 'other.example', purpose: 'backend', keyFollows: true })
+  })
+
+  test('the Desktop key does not claim to follow; no key at all and a no-move change use the plain wording', async () => {
+    const desktop = withKey()
+    await desktop.service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+    expect(desktop.prompts).toEqual(['Send node content to other.example (your stored model key does not follow)'])
+
+    const keyless = setup({ server: configured() })
+    await keyless.service.set({ revision: 'r1', backend: { base_url: 'https://other.example/v1' } })
+    expect(keyless.prompts[0]).toContain('does not follow')
+
+    // A model change on a server-keyed backend is not a move: the key stays with the same host.
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'file' }
+    const same = setup({ server, touch: { available: false } })
+    await same.service.set({ revision: 'r1', backend: { model: 'm-two' } })
+    expect(same.dialogs[0].keyFollows).toBe(false)
+  })
+
+  test('the key-follows copy says so in the Touch ID reasons and the native dialog', () => {
+    const en = require('../../assets/locales/en.json')
+    expect(en.agentSettings.touchReasonHostKeyFollows).toContain('model key your server manages')
+    expect(en.agentSettings.touchReasonBackendKeyFollows).toContain('will be sent to the new host')
+    expect(en.agentSettings.dialog.detailKeyFollows).toContain('so will the model key your server manages')
+    for (const k of ['touchReasonHostKeyFollows', 'touchReasonBackendKeyFollows']) expect(en.agentSettings[k]).not.toContain('does not follow')
+    expect(en.agentSettings.dialog.detailKeyFollows).not.toContain('not sent')
+  })
+
+  test('the copy says the key does not follow, in the Touch ID reasons and the native dialog', () => {
+    const en = require('../../assets/locales/en.json')
+    for (const k of ['touchReasonHost', 'touchReasonBackend']) {
+      expect(en.agentSettings[k]).toContain('does not follow')
+      expect(en.agentSettings[k]).not.toContain('goes with it')
+    }
+    expect(en.agentSettings.dialog.detail).toContain('not sent to a new host')
+    expect(en.agentSettings.dialog.detail).toContain('supply a new key')
+  })
+})
+
 test.describe('agent settings service: test connection', () => {
   test('a good probe lists models and measures latency', async () => {
     const { service, server } = setup({ server: configured() })
@@ -401,43 +637,24 @@ test.describe('agent settings service: test connection', () => {
     expect(res.ok).toBe(true)
     expect(res.models).toEqual(['m-one', 'm-two'])
     expect(Number.isInteger(res.latency_ms)).toBe(true)
-    expect(server.calls.map(c => c[0])).toEqual(['get', 'testConnection', 'listModels'])
+    expect(server.calls.map(c => c[0])).toEqual(['testConnection', 'listModels'])
   })
 
-  test('a candidate host that is not the current backend asks first, naming the host, before anything is sent', async () => {
-    const { service, server, prompts } = setup({ server: configured() })
+  test('a probe never prompts: the server withholds the stored key from an unconfirmed host', async () => {
+    const { service, server, prompts, dialogs } = setup({ server: configured() })
+    server.api.testConnection = async (req) => { server.calls.push(['testConnection', req]); return { ok: true, key_sent: false } }
     const res = await service.testConnection({ base_url: 'https://lookalike.example/v1', kind: 'openai' })
-    expect(prompts).toEqual(['Test the connection to lookalike.example'])
-    expect(res.ok).toBe(true)
-    expect(server.calls.map(c => c[0])).toEqual(['get', 'testConnection', 'listModels'])
-  })
-
-  test('the current backend host is not asked about again, in any letter case', async () => {
-    const { service, prompts } = setup({ server: configured() })
-    await service.testConnection({ base_url: 'https://LLM.example/other/path' })
     expect(prompts).toEqual([])
+    expect(dialogs).toEqual([])
+    expect(res.ok).toBe(true)
+    expect(res.key_sent).toBe(false)
+    expect(server.calls.map(c => c[0])).toEqual(['testConnection', 'listModels'])
   })
 
-  test('a declined confirmation sends nothing to the candidate', async () => {
-    const { service, server } = setup({ server: configured(), touch: { available: true, accept: false } })
-    await expect(service.testConnection({ base_url: 'https://attacker.example/v1' })).rejects.toThrow('Touch ID was not completed')
-    expect(server.calls.map(c => c[0])).toEqual(['get'])
-  })
-
-  test('with no backend configured every candidate host asks', async () => {
-    const { service, prompts } = setup()
+  test('with no backend configured a probe still does not prompt', async () => {
+    const { service, prompts } = setup({ touch: { available: false, accept: false }, native: null })
     await service.testConnection({ base_url: 'https://llm.example/v1' })
-    expect(prompts).toEqual(['Test the connection to llm.example'])
-  })
-
-  test('without Touch ID the native dialog decides, and Cancel sends nothing', async () => {
-    const accepted = setup({ server: configured(), touch: { available: false, accept: false } })
-    await accepted.service.testConnection({ base_url: 'https://other.example/v1' })
-    expect(accepted.dialogs).toEqual([{ host: 'other.example' }])
-
-    const refused = setup({ server: configured(), touch: { available: false, accept: false }, native: { accept: false } })
-    await expect(refused.service.testConnection({ base_url: 'https://other.example/v1' })).rejects.toThrow('Touch ID was not completed')
-    expect(refused.server.calls.map(c => c[0])).toEqual(['get'])
+    expect(prompts).toEqual([])
   })
 
   test('key_sent passes through as a boolean and nothing else is invented', async () => {
@@ -465,7 +682,7 @@ test.describe('agent settings service: test connection', () => {
     expect(res.detail).toContain('[redacted]')
     expect(res.detail).not.toContain(KEY)
     expect(res.models).toBeUndefined()
-    expect(server.calls.map(c => c[0])).toEqual(['get', 'testConnection'])
+    expect(server.calls.map(c => c[0])).toEqual(['testConnection'])
   })
 
   test('accepts loopback http, refuses remote http, credentials and a key in the request', async () => {

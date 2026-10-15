@@ -9,9 +9,11 @@ const KEYS = Object.freeze({
   ENDPOINT: 'agentChat.endpoint',
   TOKEN_CIPHERTEXT: 'agentChat.tokenCipher',
   /**
-   * The Desktop confirmation window. Opt-in and independent of the agent chat: it is on
-   * only when this reads as true (see parseSwitch in confirm/index.js). The tray turns it
-   * on and off; to turn it off by hand set it to false, or delete it, in the Desktop store.
+   * The Desktop confirmation window. On by default except on Windows (src/agent/defaults.js
+   * writes true when the key is absent) and independent of the agent chat: it is on only
+   * when this reads as true (see parseSwitch in confirm/index.js). The tray turns it on and
+   * off; to turn it off by hand set it to false in the Desktop store (a deleted key is
+   * written as true again at the next start).
    */
   CONFIRM_ENABLED: 'desktopConfirm.enabled',
   /** The `ipfs mcp pair` key, as safeStorage ciphertext. */
@@ -48,6 +50,20 @@ const SETTINGS_CHANNELS = Object.freeze({
 })
 
 /**
+ * IPC channels of the Search settings window (src/agent/search/). Registered only while the
+ * window module runs; the Web UI preload does not know them. The preload under
+ * src/agent/search/ui/ carries copies, checked by test/unit/agent-search.spec.js.
+ */
+const SEARCH_CHANNELS = Object.freeze({
+  STRINGS: 'ipfs-desktop:search:strings',
+  GET: 'ipfs-desktop:search:get',
+  APPLY: 'ipfs-desktop:search:apply',
+  PREVIEW: 'ipfs-desktop:search:preview',
+  PICK: 'ipfs-desktop:search:pick',
+  CLOSE: 'ipfs-desktop:search:close'
+})
+
+/**
  * IPC channels of the confirmation and pairing windows. They are registered only while
  * the confirmation is on, and the Web UI preload does not know them: the only renderers
  * that can send them are the two windows this module creates, and the handlers check the
@@ -76,4 +92,4 @@ const ARG_AGENT_SETTINGS = '--ipfs-desktop-agent-settings=1'
 /** Environment variable that locates the channel sockets, same name and meaning as `ipfs mcp`. */
 const ENV_SOCKET_DIR = 'IPFS_MCP_CONFIRM_DIR'
 
-module.exports = { KEYS, CHANNELS, SETTINGS_CHANNELS, CONFIRM_CHANNELS, ARG_AGENT_CHAT, ARG_AGENT_SETTINGS, ENV_SOCKET_DIR }
+module.exports = { KEYS, CHANNELS, SETTINGS_CHANNELS, SEARCH_CHANNELS, CONFIRM_CHANNELS, ARG_AGENT_CHAT, ARG_AGENT_SETTINGS, ENV_SOCKET_DIR }

@@ -23,6 +23,8 @@ const { getConfirmation } = require('./agent/confirm/registry')
 const { buildAgentConfirmSubmenu } = require('./agent/confirm/tray-menu')
 const { buildAgentEndpointItems } = require('./agent/tray-menu')
 const { getMcpSidecar } = require('./agent/sidecar-registry')
+const { buildSearchItems } = require('./agent/search/tray-menu')
+const { getSearchWindow } = require('./agent/search/registry')
 const DISPLAY_NAME = require('./webui/display-name')
 
 // "Default" lets the user opt back to implicit kubo defaults by nulling
@@ -267,7 +269,9 @@ async function buildMenu () {
           getSidecar: getMcpSidecar,
           store,
           launchWebUI
-        })
+        }),
+        { type: 'separator' },
+        ...buildSearchItems({ t: (key) => i18n.t(key), store, getSidecar: getMcpSidecar, getSearchWindow })
       ]
     },
     // @ts-ignore

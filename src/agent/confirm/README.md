@@ -6,7 +6,7 @@ version 2"); it adds nothing to it.
 
 ## Turn it on, turn it off, the way back
 
-It is opt-in and independent of the agent chat. The tray menu, under Settings, has
+It is on by default except on Windows (`src/agent/defaults.js` writes `desktopConfirm.enabled: true` at app start only when the key is absent; a stored `false` is kept) and independent of the agent chat. The tray menu, under Settings, has
 **Desktop Confirmations**:
 
 - **Confirm agent writes in this app** (checkbox) turns it on or off. On, with no pairing key, the
@@ -18,7 +18,7 @@ It is opt-in and independent of the agent chat. The tray menu, under Settings, h
 Turning it off is the same as unticking the tray checkbox: it persists `desktopConfirm.enabled: false`
 and destroys the windows. The way back is to tick the same checkbox. By hand, in the Desktop store
 (`config.json`), `desktopConfirm.enabled` reads as on only for `true`, `1`, `"true"`, `"on"`, `"yes"` or
-`"1"`; every other value, including `"false"`, `"off"`, `"0"` and a missing key, is off.
+`"1"`; every other value, including `"false"`, `"off"` and `"0"`, is off. A deleted key is written as `true` again at the next start; keep `false` to stay off.
 
 Not on Windows: Node cannot connect to the server's Unix socket there. The entries are greyed out.
 
