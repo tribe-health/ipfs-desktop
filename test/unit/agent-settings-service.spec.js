@@ -65,7 +65,7 @@ function fakeServer (initial = {}) {
   return { state, api, calls, bump }
 }
 
-function setup ({ server = fakeServer(), sidecarState = 'running', afterRestartState, touch = { available: true, accept: true }, native = { accept: true }, storedKey } = {}) {
+function setup ({ server = fakeServer(), sidecarState = 'running', afterRestartState, touch = { available: true, accept: true }, native = { accept: true }, storedKey, failRestartAt } = {}) {
   const keyBox = { value: storedKey }
   const secrets = {
     hasLlmKey: () => keyBox.value !== undefined,
@@ -78,6 +78,7 @@ function setup ({ server = fakeServer(), sidecarState = 'running', afterRestartS
     clearLlmKey: () => { keyBox.value = undefined }
   }
   const sidecarCalls = []
+  let restartCount = 0
   const sidecar = {
     getState: () => sidecarState,
     getPort: () => 5050,
@@ -85,7 +86,10 @@ function setup ({ server = fakeServer(), sidecarState = 'running', afterRestartS
     setEnabled: async () => { throw new Error('setEnabled must not be called by the settings service') },
     restart: async () => {
       sidecarCalls.push('restart')
+      restartCount++
       if (afterRestartState) sidecarState = afterRestartState
+      // failRestartAt: the 1-based restarts that do not come back; any other restart is healthy.
+      if (failRestartAt) sidecarState = failRestartAt.includes(restartCount) ? 'failing' : 'running'
       // The restarted child reads the stored key; the route then reports it as coming from the environment.
       server.state.backend = server.state.backend && { ...server.state.backend, api_key: keyBox.value ? { set: true, source: 'environment' } : { set: false } }
       server.bump()
@@ -326,11 +330,11 @@ test.describe('agent settings service: set and Touch ID (1.4)', () => {
     expect(err.shape.error).toMatchObject({ code: 'egress_confirmation_required', details: { host: 'x.example' } })
   })
 
-  test('refuses what the request schema refuses: unknown fields, an api_key, credentials in the URL, no change', async () => {
+  test('refuses what the request schema refuses: unknown fields, a top-level api_key, credentials in the URL, no change', async () => {
     const { service, server } = setup({ server: configured() })
     const bad = [
       { revision: 'r1', surprise: true },
-      { revision: 'r1', backend: { api_key: KEY } },
+      { revision: 'r1', api_key: KEY },
       { revision: 'r1', backend: { base_url: 'https://user:pw@llm.example/v1' } },
       { revision: 'r1', backend: { base_url: 'ftp://llm.example' } },
       { revision: 'r1', backend: { kind: 'other' } },
@@ -691,5 +695,162 @@ test.describe('agent settings service: test connection', () => {
     await expect(service.testConnection({ base_url: 'http://llm.example/v1' })).rejects.toBeInstanceOf(BridgeFailure)
     await expect(service.testConnection({ base_url: 'https://u:p@llm.example/v1' })).rejects.toBeInstanceOf(BridgeFailure)
     await expect(service.testConnection({ base_url: 'https://llm.example/v1', apiKey: KEY })).rejects.toBeInstanceOf(BridgeFailure)
+  })
+})
+
+test.describe('agent settings service: a key goes with Apply on a backend move (ADR-0012, U1/U2)', () => {
+  const NEW_KEY = 'sk-new-key-9876543210'
+  const withKey = (opts = {}) => {
+    const server = configured()
+    server.state.backend.api_key = { set: true, source: 'environment' }
+    return setup({ server, storedKey: KEY, ...opts })
+  }
+  const kindChange = (extra = {}) => ({
+    revision: 'r1',
+    backend: { kind: 'uar', base_url: 'https://uar.example/v1', model: 'agent', ...extra },
+    egress_confirmation: { host: 'uar.example' }
+  })
+  const everything = (ctx, res) => JSON.stringify([res, ctx.logs, ctx.server.calls, ctx.prompts, ctx.dialogs])
+
+  test('set with api_key on a kind change: confirmed, stored, applied after the backend, and the old key is not carried', async () => {
+    const ctx = withKey()
+    const keyAtPut = []
+    const put = ctx.server.api.put
+    ctx.server.api.put = async (...args) => { keyAtPut.push(ctx.keyBox.value); return put(...args) }
+    const res = await ctx.service.set(kindChange({ api_key: NEW_KEY }))
+    // One confirmation, then: old key dropped + restart, backend written with no key, new key stored + restart.
+    expect(ctx.prompts).toEqual(['Send node content to uar.example (your stored model key does not follow)'])
+    expect(ctx.sidecarCalls).toEqual(['restart', 'restart'])
+    expect(keyAtPut).toEqual([undefined])
+    expect(ctx.keyBox.value).toEqual(NEW_KEY)
+    const putCall = ctx.server.calls.find(c => c[0] === 'put')
+    expect(putCall[2]).toEqual({ backend: { kind: 'uar', base_url: 'https://uar.example/v1', model: 'agent' }, egress_confirmation: { host: 'uar.example' } })
+    expect(res.backend.kind).toEqual('uar')
+    expect(res.backend.api_key).toEqual({ set: true, source: 'settings_api' })
+    expect(res.key_not_carried).toBeUndefined()
+    expect(everything(ctx, res)).not.toContain(NEW_KEY)
+    expect(everything(ctx, res)).not.toContain(KEY)
+  })
+
+  test('a kind change with the host unchanged still asks, and a decline changes nothing', async () => {
+    const asked = withKey()
+    await asked.service.set({ revision: 'r1', backend: { kind: 'uar' } })
+    expect(asked.prompts).toHaveLength(1)
+
+    const native = withKey({ touch: { available: false, accept: false } })
+    await native.service.set({ revision: 'r1', backend: { kind: 'uar' } })
+    expect(native.dialogs[0]).toMatchObject({ host: 'llm.example', purpose: 'backend' })
+
+    const declined = withKey({ touch: { available: true, accept: false } })
+    await expect(declined.service.set({ revision: 'r1', backend: { kind: 'uar', api_key: NEW_KEY } })).rejects.toBeInstanceOf(BridgeFailure)
+    expect(declined.keyBox.value).toEqual(KEY)
+    expect(declined.sidecarCalls).toEqual([])
+    expect(declined.server.calls.some(c => c[0] === 'put')).toBe(false)
+  })
+
+  test('set with a kind change and no key clears the old key and reports key_not_carried', async () => {
+    const ctx = withKey()
+    const res = await ctx.service.set({ revision: 'r1', backend: { kind: 'uar' } })
+    expect(ctx.keyBox.value).toBeUndefined()
+    expect(ctx.sidecarCalls).toEqual(['restart'])
+    expect(res.key_not_carried).toEqual({ reason: 'host_changed', cleared: true })
+    expect(res.backend.api_key).toEqual({ set: false })
+    expect(everything(ctx, res)).not.toContain(KEY)
+  })
+
+  test('a same-kind change keeps the key, and a key supplied on a model change replaces it', async () => {
+    const same = withKey()
+    await same.service.set({ revision: 'r1', backend: { kind: 'openai', model: 'm-two' } })
+    expect(same.keyBox.value).toEqual(KEY)
+    expect(same.sidecarCalls).toEqual([])
+
+    const replaced = withKey()
+    const res = await replaced.service.set({ revision: 'r1', backend: { model: 'm-two', api_key: NEW_KEY } })
+    expect(replaced.keyBox.value).toEqual(NEW_KEY)
+    expect(replaced.sidecarCalls).toEqual(['restart'])
+    expect(res.key_not_carried).toBeUndefined()
+    expect(everything(replaced, res)).not.toContain(NEW_KEY)
+  })
+
+  test('set with api_key: null clears the key and restarts, without a put or a prompt', async () => {
+    const ctx = withKey()
+    const res = await ctx.service.set({ revision: 'r1', backend: { api_key: null } })
+    expect(ctx.keyBox.value).toBeUndefined()
+    expect(ctx.sidecarCalls).toEqual(['restart'])
+    expect(ctx.server.calls.some(c => c[0] === 'put')).toBe(false)
+    expect(ctx.prompts).toEqual([])
+    expect(res.backend.api_key).toEqual({ set: false })
+    expect(res.key_not_carried).toBeUndefined()
+
+    const none = setup({ server: configured() })
+    await none.service.set({ revision: 'r1', backend: { api_key: null } })
+    expect(none.sidecarCalls).toEqual([])
+  })
+
+  test('api_key alone applies the key to the current backend', async () => {
+    const ctx = setup({ server: configured() })
+    const res = await ctx.service.set({ revision: 'r1', backend: { api_key: NEW_KEY } })
+    expect(ctx.keyBox.value).toEqual(NEW_KEY)
+    expect(ctx.sidecarCalls).toEqual(['restart'])
+    expect(ctx.server.calls.some(c => c[0] === 'put')).toBe(false)
+    expect(ctx.prompts).toEqual([])
+    expect(res.backend.api_key).toEqual({ set: true, source: 'settings_api' })
+  })
+
+  test('a refused apply restores the previous key and backend', async () => {
+    // The sidecar refuses the write: the new key was never stored, the old one is back.
+    const refused = withKey()
+    refused.server.api.put = async () => { throw new SettingsApiError(500, null, 'refused') }
+    await expect(refused.service.set(kindChange({ api_key: NEW_KEY }))).rejects.toBeInstanceOf(BridgeFailure)
+    expect(refused.keyBox.value).toEqual(KEY)
+    expect(refused.sidecarCalls).toEqual(['restart', 'restart'])
+    expect(refused.server.state.backend.kind).toEqual('openai')
+
+    // The write lands, then the restart that applies the new key does not come back.
+    const late = withKey({ failRestartAt: [2] })
+    const err = await late.service.set(kindChange({ api_key: NEW_KEY })).catch(e => e)
+    expect(err).toBeInstanceOf(BridgeFailure)
+    expect(err.message).toEqual('did not come back')
+    expect(late.keyBox.value).toEqual(KEY)
+    expect(late.server.state.backend).toMatchObject({ kind: 'openai', base_url: 'https://llm.example/v1', model: 'm-one' })
+    expect(late.logs.warn.join(' ')).toContain('restored')
+    expect(everything(late, err.message)).not.toContain(NEW_KEY)
+    expect(everything(late, err.message)).not.toContain(KEY)
+    expect((await late.service.status()).applied.ok).toBe(false)
+  })
+
+  test('a key the keystore refuses after the backend write rolls the backend and the old key back', async () => {
+    const ctx = withKey()
+    const err = await ctx.service.set(kindChange({ api_key: 'has space' })).catch(e => e)
+    expect(err.message).toEqual('key shape')
+    expect(ctx.keyBox.value).toEqual(KEY)
+    expect(ctx.server.state.backend.kind).toEqual('openai')
+    expect(err.message).not.toContain('has space')
+  })
+
+  test('the backend api_key is validated like setApiKey and an unknown field is still refused', async () => {
+    const ctx = withKey()
+    for (const bad of ['', 5, 'k'.repeat(513), {}, true]) {
+      await expect(ctx.service.set({ revision: 'r1', backend: { api_key: bad } }), JSON.stringify(bad)).rejects.toBeInstanceOf(BridgeFailure)
+    }
+    await expect(ctx.service.set({ revision: 'r1', backend: { api_key: NEW_KEY, extra: 1 } })).rejects.toBeInstanceOf(BridgeFailure)
+    expect(ctx.server.calls).toEqual([])
+    expect(ctx.keyBox.value).toEqual(KEY)
+  })
+
+  test('setApiKey and clearApiKey ignore kind and work on the current backend only', async () => {
+    const set = withKey()
+    const res = await set.service.setApiKey({ revision: 'r1', api_key: NEW_KEY, kind: 'uar' })
+    expect(set.keyBox.value).toEqual(NEW_KEY)
+    expect(set.server.calls.some(c => c[0] === 'put')).toBe(false)
+    expect(set.server.state.backend.kind).toEqual('openai')
+    expect(set.prompts).toEqual([])
+    expect(JSON.stringify(res)).not.toContain(NEW_KEY)
+
+    const clear = withKey()
+    await clear.service.clearApiKey({ revision: 'r1', kind: 'uar' })
+    expect(clear.keyBox.value).toBeUndefined()
+    expect(clear.server.calls.some(c => c[0] === 'put')).toBe(false)
+    expect(clear.server.state.backend.kind).toEqual('openai')
   })
 })
