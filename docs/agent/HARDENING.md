@@ -308,3 +308,7 @@ preload; to reproduce the original preload failure, run it with `git stash` on
   ciphertext format, persistence across a restart and the storage audit are real; the OS
   keystore's strength is not tested. The operator should do one real-Keychain run.
 - Windows and Linux were not run.
+
+## Model key on a backend kind change (ADR-0012)
+
+On a backend kind change, or a move to another host, the new model key goes with Apply, in `set` as the write-only `backend.api_key` next to `base_url` and the typed `egress_confirmation`; Desktop asks for Touch ID or the native dialog even when the host is unchanged, clears the stored key it held (reported as `key_not_carried`), stores the new key in safeStorage only after the backend write, and restores the previous backend and key if the apply fails; Save key and Remove key (`setApiKey`, `clearApiKey`) ignore `kind` and act on the current backend only. The write response still reports the withheld key as `key_not_carried` with `reason: "host_changed"` for a kind change (ADR-0012 amendment of 2026-10-16: no contract change this round), so Desktop words its notice from the backend kind, not from the reason. A key given to the node by a run flag is not Desktop's and follows as configured.
